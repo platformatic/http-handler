@@ -1,0 +1,17 @@
+# OS specific files
+.DS_Store
+
+# Development environment files
+/.claude
+
+#Lock files
+/Cargo.lock
+/pnpm-lock.yaml
+/package-lock.json
+/yarn.lock
+
+# Build/Install files
+/node_modules
+/target
+/*.node
+index.d.ts
