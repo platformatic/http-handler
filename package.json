@@ -1,0 +1,38 @@
+{
+  "name": "@platformatic/http-handler",
+  "private": true,
+  "version": "1.0.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/platformatic/http-handler.git"
+  },
+  "napi": {
+    "binaryName": "http-handler",
+    "targets": [
+      "aarch64-apple-darwin",
+      "x86_64-apple-darwin",
+      "x86_64-unknown-linux-gnu"
+    ]
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@napi-rs/cli": "3.0.0-alpha.89",
+    "@oxc-node/core": "^0.0.23",
+    "oxlint": "^0.16.0"
+  },
+  "engines": {
+    "node": ">= 10"
+  },
+  "scripts": {
+    "artifacts": "napi artifacts",
+    "build": "npm run build:debug -- --release",
+    "build:debug": "napi build --platform --features napi-support",
+    "prepublishOnly": "napi prepublish -t npm",
+    "lint": "oxlint",
+    "test": "node --test test/**.test.mjs",
+    "universal": "napi universal",
+    "version": "napi version"
+  }
+}
