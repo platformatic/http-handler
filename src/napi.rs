@@ -5,33 +5,36 @@ use std::{
 };
 
 use bytes::BytesMut;
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{
+    HeaderMap as HttpHeaderMap, HeaderName, HeaderValue as HttpHeaderValue,
+    request::Builder as RequestBuilder, response::Builder as ResponseBuilder,
+};
 use napi::{Either, Error, Result, Status, bindgen_prelude::*};
 use napi_derive::napi;
 
-use crate::{Request, RequestBuilderExt, RequestExt, Response, ResponseBuilderExt, SocketInfo};
+use crate::{
+    Request as InnerRequest, RequestBuilderExt, RequestExt, Response as InnerResponse,
+    ResponseBuilderExt, SocketInfo as InnerSocketInfo,
+};
 
 //
-// NapiHeaderMap
+// HeaderMap
 //
-
-// TODO: How can we handle both ClassInstance<NapiHeaders> and NapiHeaderMap?
-// pub type NapiHeadersInput<'a> = Either<ClassInstance<'a, NapiHeaders>, NapiHeaderMap>;
 
 /// A header entry value, which can be either a string or array of strings.
 #[napi]
-pub type NapiHeaderMapValue = Either<String, Vec<String>>;
+pub type HeaderMapValue = Either<String, Vec<String>>;
 
 /// A multi-map of HTTP headers. Any given header key can have multiple values.
 #[napi(transparent)]
 #[derive(Default)]
-pub struct NapiHeaderMap(pub HashMap<String, NapiHeaderMapValue>);
+pub struct HeaderMap(pub HashMap<String, HeaderMapValue>);
 
-impl TryFrom<NapiHeaderMap> for HeaderMap {
+impl TryFrom<HeaderMap> for HttpHeaderMap {
     type Error = Error;
 
-    fn try_from(map: NapiHeaderMap) -> std::result::Result<Self, Self::Error> {
-        let mut headers = HeaderMap::new();
+    fn try_from(map: HeaderMap) -> std::result::Result<Self, Self::Error> {
+        let mut headers = HttpHeaderMap::new();
 
         for (key, value) in map.0 {
             let header_name = HeaderName::try_from(key).map_err(|e| {
@@ -40,14 +43,14 @@ impl TryFrom<NapiHeaderMap> for HeaderMap {
 
             match value {
                 Either::A(value) => {
-                    let header_value = HeaderValue::try_from(value).map_err(|e| {
+                    let header_value = HttpHeaderValue::try_from(value).map_err(|e| {
                         Error::new(Status::InvalidArg, format!("Invalid header value: {}", e))
                     })?;
                     headers.insert(header_name, header_value);
                 }
                 Either::B(values) => {
                     for value in values {
-                        let header_value = HeaderValue::try_from(value).map_err(|e| {
+                        let header_value = HttpHeaderValue::try_from(value).map_err(|e| {
                             Error::new(Status::InvalidArg, format!("Invalid header value: {}", e))
                         })?;
                         headers.append(header_name.clone(), header_value);
@@ -64,30 +67,29 @@ impl TryFrom<NapiHeaderMap> for HeaderMap {
 // HeaderValue
 //
 
-#[napi]
-struct NapiHeaderValue(HeaderValue);
+struct HeaderValue(HttpHeaderValue);
 
-impl Deref for NapiHeaderValue {
-    type Target = HeaderValue;
+impl Deref for HeaderValue {
+    type Target = HttpHeaderValue;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for NapiHeaderValue {
+impl DerefMut for HeaderValue {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl TryFrom<String> for NapiHeaderValue {
+impl TryFrom<String> for HeaderValue {
     type Error = Error;
 
     fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        HeaderValue::try_from(value)
+        HttpHeaderValue::try_from(value)
             .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid header value: {}", e)))
-            .map(NapiHeaderValue)
+            .map(HeaderValue)
     }
 }
 
@@ -95,10 +97,10 @@ impl TryFrom<String> for NapiHeaderValue {
 // SocketInfo
 //
 
-/// Input options for creating a NapiSocketInfo.
+/// Input options for creating a SocketInfo.
 #[napi(object)]
 #[derive(Default)]
-pub struct NapiSocketInfo {
+pub struct SocketInfo {
     /// The string representation of the local IP address the remote client is connecting on.
     pub local_address: String,
     /// The numeric representation of the local port. For example, 80 or 21.
@@ -113,10 +115,10 @@ pub struct NapiSocketInfo {
     pub remote_family: String,
 }
 
-impl TryFrom<SocketInfo> for NapiSocketInfo {
+impl TryFrom<InnerSocketInfo> for SocketInfo {
     type Error = Error;
 
-    fn try_from(socket: SocketInfo) -> Result<Self> {
+    fn try_from(socket: InnerSocketInfo) -> Result<Self> {
         let local = socket.local.ok_or(Error::new(
             Status::InvalidArg,
             "Local socket address is required",
@@ -137,7 +139,7 @@ impl TryFrom<SocketInfo> for NapiSocketInfo {
         let (local_address, local_port, local_family) = socket_info_tuple(&local);
         let (remote_address, remote_port, remote_family) = socket_info_tuple(&remote);
 
-        Ok(NapiSocketInfo {
+        Ok(SocketInfo {
             local_address,
             local_port,
             local_family,
@@ -148,10 +150,10 @@ impl TryFrom<SocketInfo> for NapiSocketInfo {
     }
 }
 
-impl TryFrom<NapiSocketInfo> for SocketInfo {
+impl TryFrom<SocketInfo> for InnerSocketInfo {
     type Error = Error;
 
-    fn try_from(socket: NapiSocketInfo) -> std::result::Result<Self, Self::Error> {
+    fn try_from(socket: SocketInfo) -> std::result::Result<Self, Self::Error> {
         fn sock_addr(family: &str, address: &str, port: u16) -> Result<SocketAddr> {
             if family == "IPv6" {
                 format!("[{}]:{}", address, port)
@@ -180,55 +182,54 @@ impl TryFrom<NapiSocketInfo> for SocketInfo {
 }
 
 //
-// NapiHeaders
+// Headers
 //
 
-/// A NapiHeaders wraps an http::HeaderMap instance to expose it to JavaScript.
+/// Wraps an http::HeaderMap instance to expose it to JavaScript.
 ///
 /// It provides methods to access and modify HTTP headers, iterate over them,
 /// and convert them to a JSON object representation.
-#[napi(js_name = "Headers")]
+#[napi]
 #[derive(Debug, Clone, Default)]
-pub struct NapiHeaders(HeaderMap);
+pub struct Headers(HttpHeaderMap);
 
-impl Deref for NapiHeaders {
-    type Target = HeaderMap;
+impl Deref for Headers {
+    type Target = HttpHeaderMap;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for NapiHeaders {
+impl DerefMut for Headers {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-impl FromNapiValue for NapiHeaders {
+impl FromNapiValue for Headers {
     unsafe fn from_napi_value(env: sys::napi_env, value: sys::napi_value) -> Result<Self> {
-        // Try to convert from ClassInstance<NapiHeaders>
-        if let Ok(instance) = unsafe { ClassInstance::<NapiHeaders>::from_napi_value(env, value) } {
-            return Ok(NapiHeaders(instance.0.clone()));
+        // Try to convert from ClassInstance<Headers>
+        if let Ok(instance) = unsafe { ClassInstance::<Headers>::from_napi_value(env, value) } {
+            return Ok(Headers(instance.0.clone()));
         }
 
-        // If that fails, try to convert from NapiHeaderMap
-        if let Ok(header_map) = unsafe { NapiHeaderMap::from_napi_value(env, value) } {
-            return Ok(NapiHeaders(header_map.try_into()?));
+        // If that fails, try to convert from HeaderMap
+        if let Ok(header_map) = unsafe { HeaderMap::from_napi_value(env, value) } {
+            return Ok(Headers(header_map.try_into()?));
         }
 
         // If both conversions fail, return an error
         Err(Error::new(
             Status::InvalidArg,
-            "Expected Headers or NapiHeaderMap",
+            "Expected Headers or HeaderMap",
         ))
     }
 }
 
 #[napi]
-impl NapiHeaders {
-    // TODO: accept Either<ClassInstance<NapiHeaders>, NapiHeaderMap>
-    /// Create a new NapiHeaders instance.
+impl Headers {
+    /// Create a new Headers instance.
     ///
     /// # Examples
     ///
@@ -244,7 +245,7 @@ impl NapiHeaders {
     /// }
     /// ```
     #[napi(constructor)]
-    pub fn new(options: Option<NapiHeaderMap>) -> Result<Self> {
+    pub fn new(options: Option<HeaderMap>) -> Result<Self> {
         Ok(Self(options.unwrap_or_default().try_into()?))
     }
 
@@ -355,7 +356,7 @@ impl NapiHeaders {
     /// headers.set('Content-Type', 'application/json');
     /// ```
     #[napi]
-    pub fn set(&mut self, key: String, value: NapiHeaderMapValue) -> Result<bool> {
+    pub fn set(&mut self, key: String, value: HeaderMapValue) -> Result<bool> {
         let key = HeaderName::try_from(key)
             .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid header name: {}", e)))?;
 
@@ -363,14 +364,14 @@ impl NapiHeaders {
 
         match value {
             Either::A(value) => {
-                let value = HeaderValue::try_from(value).map_err(|e| {
+                let value = HttpHeaderValue::try_from(value).map_err(|e| {
                     Error::new(Status::InvalidArg, format!("Invalid header value: {}", e))
                 })?;
                 self.0.insert(key, value);
             }
             Either::B(values) => {
                 for value in values {
-                    let value = HeaderValue::try_from(value).map_err(|e| {
+                    let value = HttpHeaderValue::try_from(value).map_err(|e| {
                         Error::new(Status::InvalidArg, format!("Invalid header value: {}", e))
                     })?;
                     self.0.append(key.clone(), value);
@@ -397,7 +398,7 @@ impl NapiHeaders {
         let key = HeaderName::try_from(key)
             .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid header name: {}", e)))?;
 
-        let value = HeaderValue::try_from(value)
+        let value = HttpHeaderValue::try_from(value)
             .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid header value: {}", e)))?;
 
         Ok(self.0.append(key, value))
@@ -562,36 +563,36 @@ impl NapiHeaders {
 // Request
 //
 
-/// Input options for creating a NapiRequest.
+/// Input options for creating a Request.
 #[napi(object)]
 #[derive(Default)]
-pub struct NapiRequestOptions {
+pub struct RequestOptions {
     /// The HTTP method for the request.
     pub method: Option<String>,
     /// The URI for the request.
     pub uri: String,
     /// The headers for the request.
-    #[napi(ts_type = "Headers | NapiHeaderMap")]
-    pub headers: Option<NapiHeaders>,
+    #[napi(ts_type = "Headers | HeaderMap")]
+    pub headers: Option<Headers>,
     /// The body for the request.
     pub body: Option<Buffer>,
     /// The socket information for the request.
-    pub socket: Option<NapiSocketInfo>,
+    pub socket: Option<SocketInfo>,
     /// Document root for the request, if applicable.
     pub docroot: Option<String>,
 }
 
-/// A NapiRequest wraps an http::Request instance to expose it to JavaScript.
+/// Wraps an http::Request instance to expose it to JavaScript.
 ///
 /// It provides methods to access the HTTP method, URI, headers, and body of
 /// the request along with a toJSON method to convert it to a JSON object.
 #[napi(js_name = "Request")]
 #[derive(Debug, Clone)]
-pub struct NapiRequest(Request);
+pub struct Request(InnerRequest);
 
 #[napi]
-impl NapiRequest {
-    /// Create a new NapiRequest from a Request instance.
+impl Request {
+    /// Create a new Request from a Request instance.
     ///
     /// # Examples
     ///
@@ -608,8 +609,14 @@ impl NapiRequest {
     /// });
     /// ```
     #[napi(constructor)]
-    pub fn new(options: NapiRequestOptions) -> Result<Self> {
-        let mut request = http::request::Builder::new()
+    pub fn new(options: Option<RequestOptions>) -> Result<Self> {
+        // This is just to make the error message clearer when no options are provided.
+        let options = match options {
+            Some(opts) => opts,
+            None => return Err(Error::new(Status::InvalidArg, "Missing `options` argument")),
+        };
+
+        let mut request = RequestBuilder::new()
             .method(options.method.unwrap_or_else(|| "GET".to_string()).as_str())
             .uri(&options.uri);
 
@@ -637,7 +644,7 @@ impl NapiRequest {
             .body(body)
             .expect("Failed to build request");
 
-        Ok(NapiRequest(request))
+        Ok(Request(request))
     }
 
     /// Get the HTTP method for the request.
@@ -657,6 +664,27 @@ impl NapiRequest {
         self.0.method().to_string()
     }
 
+    /// Set the HTTP method for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///  uri: "/index.php"
+    /// });
+    ///
+    /// request.method = "POST";
+    /// console.log(request.method); // POST
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "method")]
+    pub fn set_method(&mut self, method: String) -> Result<()> {
+        *self.0.method_mut() = method
+            .parse()
+            .map_err(|_| Error::new(Status::InvalidArg, "Invalid `method` name"))?;
+
+        Ok(())
+    }
+
     /// Get the URI for the request.
     ///
     /// # Examples
@@ -671,6 +699,27 @@ impl NapiRequest {
     #[napi(getter, enumerable = true)]
     pub fn uri(&self) -> String {
         self.0.uri().to_string()
+    }
+
+    /// Set the URI for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///  uri: "/index.php"
+    /// });
+    ///
+    /// request.uri = "/new-uri";
+    /// console.log(request.uri); // /new-uri
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "uri")]
+    pub fn set_uri(&mut self, uri: String) -> Result<()> {
+        *self.0.uri_mut() = uri
+            .parse()
+            .map_err(|_| Error::new(Status::InvalidArg, "Invalid URI"))?;
+
+        Ok(())
     }
 
     /// Get the headers for the request.
@@ -690,8 +739,30 @@ impl NapiRequest {
     /// }
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn headers(&self) -> NapiHeaders {
-        NapiHeaders(self.0.headers().clone())
+    pub fn headers(&self) -> Headers {
+        Headers(self.0.headers().clone())
+    }
+
+    /// Set the headers for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///  uri: "/index.php"
+    /// });
+    ///
+    /// request.headers = new Headers({
+    ///  'Content-Type': ['application/json']
+    /// });
+    ///
+    /// for (const mime of request.headers.getAll('Content-Type')) {
+    ///  console.log(mime); // application/json
+    /// }
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "headers")]
+    pub fn set_headers(&mut self, headers: Headers) {
+        *self.0.headers_mut() = headers.deref().clone();
     }
 
     /// Get the document root for the request, if applicable.
@@ -711,6 +782,23 @@ impl NapiRequest {
         self.0.document_root().map(|s| s.path.display().to_string())
     }
 
+    /// Set the document root for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///  uri: "/index.php"
+    /// });
+    ///
+    /// request.docroot = "/var/www/html";
+    /// console.log(request.docroot); // /var/www/html
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "docroot")]
+    pub fn set_docroot(&mut self, docroot: String) {
+        *self.0.document_root_mut() = docroot.into();
+    }
+
     /// Get the body of the request as a Buffer.
     ///
     /// # Examples
@@ -728,6 +816,26 @@ impl NapiRequest {
     #[napi(getter, enumerable = true)]
     pub fn body(&self) -> Buffer {
         Buffer::from(self.0.body().to_vec())
+    }
+
+    /// Set the body of the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///  uri: "/v2/api/thing"
+    /// });
+    ///
+    /// request.body = Buffer.from(JSON.stringify({
+    ///   message: 'Hello, world!'
+    /// }));
+    ///
+    /// console.log(request.body.toString()); // {"message":"Hello, world!"}
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "body")]
+    pub fn set_body(&mut self, body: Buffer) {
+        *self.0.body_mut() = BytesMut::from(body.deref());
     }
 
     /// Convert the response to a JSON object representation.
@@ -759,42 +867,35 @@ impl NapiRequest {
     }
 }
 
-impl Deref for NapiRequest {
-    type Target = Request;
+impl Deref for Request {
+    type Target = InnerRequest;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for NapiRequest {
+impl DerefMut for Request {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-// TODO: Get rid of these and use derefs instead
-// impl From<&NapiRequest> for Request {
-//     fn from(request: &NapiRequest) -> Self {
-//         request.0.to_owned()
-//     }
-// }
-
-impl From<Request> for NapiRequest {
-    fn from(request: Request) -> Self {
-        NapiRequest(request)
+impl From<InnerRequest> for Request {
+    fn from(request: InnerRequest) -> Self {
+        Request(request)
     }
 }
 
-impl FromNapiValue for NapiRequest {
+impl FromNapiValue for Request {
     unsafe fn from_napi_value(env: sys::napi_env, value: sys::napi_value) -> Result<Self> {
-        // Try to convert from ClassInstance<NapiRequest>
-        if let Ok(instance) = unsafe { ClassInstance::<NapiRequest>::from_napi_value(env, value) } {
+        // Try to convert from ClassInstance<Request>
+        if let Ok(instance) = unsafe { ClassInstance::<Request>::from_napi_value(env, value) } {
             return Ok(instance.deref().clone());
         }
 
         // If both conversions fail, return an error
-        Err(Error::new(Status::InvalidArg, "Expected NapiRequest"))
+        Err(Error::new(Status::InvalidArg, "Expected Request"))
     }
 }
 
@@ -802,22 +903,22 @@ impl FromNapiValue for NapiRequest {
 // Response
 //
 
-/// Input options for creating a NapiResponse.
+/// Input options for creating a Response.
 #[napi(object)]
 #[derive(Default)]
-pub struct NapiResponseOptions {
+pub struct ResponseOptions {
     /// The HTTP method for the request.
     pub status: Option<u16>,
     /// The headers for the request.
-    #[napi(ts_type = "Headers | NapiHeaderMap")]
-    pub headers: Option<NapiHeaders>,
+    #[napi(ts_type = "Headers | HeaderMap")]
+    pub headers: Option<Headers>,
     /// The body for the request.
     pub body: Option<Buffer>,
     /// The log output for the request.
     pub log: Option<Buffer>,
 }
 
-/// A NapiResponse wraps an http::Response instance to expose it to JavaScript.
+/// Wraps an http::Response instance to expose it to JavaScript.
 ///
 /// It provides methods to access the status code, headers, and body of the
 /// response along with a toJSON method to convert it to a JSON object.
@@ -842,11 +943,11 @@ pub struct NapiResponseOptions {
 /// console.log(response.body.toString()); // {"message":"Hello, world!"}
 /// ```
 #[napi(js_name = "Response")]
-pub struct NapiResponse(Response);
+pub struct Response(InnerResponse);
 
 #[napi]
-impl NapiResponse {
-    /// Create a new NapiResponse from a Response instance.
+impl Response {
+    /// Create a new Response from a Response instance.
     ///
     /// # Examples
     ///
@@ -860,8 +961,9 @@ impl NapiResponse {
     /// });
     /// ```
     #[napi(constructor)]
-    pub fn new(options: NapiResponseOptions) -> Result<Self> {
-        let mut builder = http::response::Builder::new();
+    pub fn new(options: Option<ResponseOptions>) -> Result<Self> {
+        let options = options.unwrap_or_default();
+        let mut builder = ResponseBuilder::new();
 
         if let Some(status) = options.status {
             builder = builder.status(status);
@@ -889,7 +991,7 @@ impl NapiResponse {
             )
         })?;
 
-        Ok(NapiResponse(response))
+        Ok(Response(response))
     }
 
     /// Get the HTTP status code for the response.
@@ -910,8 +1012,25 @@ impl NapiResponse {
     /// console.log(response.status); // 200
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn status(&self) -> i32 {
-        self.0.status().as_u16() as i32
+    pub fn status(&self) -> u16 {
+        self.0.status().as_u16()
+    }
+
+    /// Set the HTTP status code for the response.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const response = new Response();
+    ///
+    /// response.status = 404;
+    /// console.log(response.status); // 404
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "status")]
+    pub fn set_status(&mut self, status: u16) -> Result<()> {
+        *self.0.status_mut() = http::StatusCode::from_u16(status)
+            .map_err(|_| Error::new(Status::InvalidArg, "Invalid status code"))?;
+        Ok(())
     }
 
     /// Get the headers for the response.
@@ -933,8 +1052,28 @@ impl NapiResponse {
     /// }
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn headers(&self) -> NapiHeaders {
-        NapiHeaders(self.0.headers().clone())
+    pub fn headers(&self) -> Headers {
+        Headers(self.0.headers().clone())
+    }
+
+    /// Set the headers for the response.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const response = new Response();
+    ///
+    /// response.headers = new Headers({
+    ///  'Content-Type': ['application/json']
+    /// });
+    ///
+    /// for (const mime of response.headers.getAll('Content-Type')) {
+    ///  console.log(mime); // application/json
+    /// }
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "headers")]
+    pub fn set_headers(&mut self, headers: Headers) {
+        *self.0.headers_mut() = headers.deref().clone();
     }
 
     /// Get the body of the response as a Buffer.
@@ -953,6 +1092,24 @@ impl NapiResponse {
     #[napi(getter, enumerable = true)]
     pub fn body(&self) -> Buffer {
         Buffer::from(self.0.body().to_vec())
+    }
+
+    /// Set the body of the response.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const response = new Response();
+    ///
+    /// response.body = Buffer.from(JSON.stringify({
+    ///   message: 'Hello, world!'
+    /// }));
+    ///
+    /// console.log(response.body.toString()); // {"message":"Hello, world!"}
+    /// ```
+    #[napi(setter, enumerable = true, js_name = "body")]
+    pub fn set_body(&mut self, body: Buffer) {
+        *self.0.body_mut() = BytesMut::from(body.deref());
     }
 
     /// Convert the response to a JSON object representation.
@@ -982,29 +1139,22 @@ impl NapiResponse {
     }
 }
 
-impl Deref for NapiResponse {
-    type Target = Response;
+impl Deref for Response {
+    type Target = InnerResponse;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl DerefMut for NapiResponse {
+impl DerefMut for Response {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
-// TODO: Get rid of these and use derefs instead
-impl From<&NapiResponse> for Response {
-    fn from(response: &NapiResponse) -> Self {
-        response.0.to_owned()
-    }
-}
-
-impl From<Response> for NapiResponse {
-    fn from(response: Response) -> Self {
-        NapiResponse(response)
+impl From<InnerResponse> for Response {
+    fn from(response: InnerResponse) -> Self {
+        Response(response)
     }
 }
