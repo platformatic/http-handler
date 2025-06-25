@@ -84,10 +84,24 @@ jobs:
           options: '--user 0:0 -v ${{ github.workspace }}/.cargo-cache/git/db:/usr/local/cargo/git/db -v ${{ github.workspace }}/.cargo/registry/cache:/usr/local/cargo/registry/cache -v ${{ github.workspace }}/.cargo/registry/index:/usr/local/cargo/registry/index -v ${{ github.workspace }}:/build -w /build'
           run: |
             set -x
-            eval `ssh-agent -s`
-            ssh-add
+
+            # Install apt dependencies
+            apt-get update -y
+            apt-get install -y openssh-client
+
+            # Setup pnpm
             corepack disable
             npm i -gf pnpm
+
+            # Set up SSH key (to checkout private repos with cargo)
+            mkdir -p ~/.ssh
+            chmod -R 400 ~/.ssh
+            touch ~/.ssh/config  ~/.ssh/known_hosts
+            eval `ssh-agent -s`
+            echo "${{ secrets.HTTP_HANDLER_ACCESS_TOKEN }}" | tr -d '\r' | ssh-add -
+            ssh-add -l
+            ssh-keyscan -t rsa github.com >> ~/.ssh/known_hosts
+
             ${{ matrix.settings.build }}
       - name: Build
         run: ${{ matrix.settings.build }}
