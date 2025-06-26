@@ -4,7 +4,6 @@ env:
   DEBUG: napi:*
   APP_NAME: http-handler
   MACOSX_DEPLOYMENT_TARGET: '10.13'
-  CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
 
 permissions:
   contents: write
@@ -150,6 +149,7 @@ jobs:
       - name: List packages
         run: ls -R .
         shell: bash
+      - run: cargo test
       - run: pnpm test
 
   test-linux-binding:
@@ -213,7 +213,24 @@ jobs:
             }
           " >> $GITHUB_OUTPUT
           echo "PNPM_STORE_PATH=$(pnpm store path --silent)" >> $GITHUB_OUTPUT
-      - name: Test crates and bindings
+      - name: Test crates
+        uses: addnab/docker-run-action@v3
+        with:
+          image: ${{ steps.docker.outputs.IMAGE }}
+          options: -v ${{ github.workspace }}:${{ github.workspace }} -w ${{ github.workspace }} --platform ${{ steps.docker.outputs.PLATFORM }}
+          run: |
+            set -x
+
+            # Install apt dependencies
+            apt-get update -y
+            apt-get install -y openssh-client curl build-essential
+
+            # Install rust toolchain
+            curl https://sh.rustup.rs -sSf | bash -s -- -y -t ${{ matrix.settings.target }}
+            . "$HOME/.cargo/env"
+
+            cargo test --target ${{ matrix.settings.target }}
+      - name: Test bindings
         uses: addnab/docker-run-action@v3
         with:
           image: ${{ steps.docker.outputs.IMAGE }}
