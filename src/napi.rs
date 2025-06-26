@@ -586,7 +586,7 @@ pub struct RequestOptions {
 ///
 /// It provides methods to access the HTTP method, URI, headers, and body of
 /// the request along with a toJSON method to convert it to a JSON object.
-#[napi(js_name = "Request")]
+#[napi]
 #[derive(Debug, Clone)]
 pub struct Request(InnerRequest);
 
@@ -942,7 +942,7 @@ pub struct ResponseOptions {
 /// }
 /// console.log(response.body.toString()); // {"message":"Hello, world!"}
 /// ```
-#[napi(js_name = "Response")]
+#[napi]
 pub struct Response(InnerResponse);
 
 #[napi]
