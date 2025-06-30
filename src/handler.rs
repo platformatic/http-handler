@@ -14,10 +14,11 @@
 //!
 //! struct HelloHandler;
 //!
+//! #[async_trait::async_trait]
 //! impl Handler for HelloHandler {
 //!     type Error = std::convert::Infallible;
 //!
-//!     fn handle(&self, _request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
+//!     async fn handle(&self, _request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
 //!         Ok(http::Response::builder()
 //!             .status(200)
 //!             .header("Content-Type", "text/plain")
@@ -40,14 +41,16 @@
 //!     header_value: &'static str,
 //! }
 //!
+//! #[async_trait::async_trait]
 //! impl<H, B> Handler<B> for AddHeaderHandler<H>
 //! where
-//!     H: Handler<B>,
+//!     H: Handler<B> + std::marker::Sync,
+//!     for<'async_trait> B: std::marker::Send + 'async_trait
 //! {
 //!     type Error = H::Error;
 //!
-//!     fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error> {
-//!         let mut response = self.inner.handle(request)?;
+//!     async fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error> {
+//!         let mut response = self.inner.handle(request).await?;
 //!         response.headers_mut().insert(
 //!             self.header_name,
 //!             self.header_value.parse().unwrap()
@@ -58,9 +61,11 @@
 //!
 //! // Usage
 //! struct ApiHandler;
+//!
+//! #[async_trait::async_trait]
 //! impl Handler for ApiHandler {
 //!     type Error = std::convert::Infallible;
-//!     fn handle(&self, _req: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
+//!     async fn handle(&self, _req: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
 //!         Ok(http::Response::builder()
 //!             .status(200)
 //!             .body(BytesMut::from(r#"{"status": "ok"}"#))
@@ -96,10 +101,11 @@ use bytes::BytesMut;
 ///
 /// struct MyHandler;
 ///
+/// #[async_trait::async_trait]
 /// impl Handler for MyHandler {
 ///     type Error = std::convert::Infallible;
 ///
-///     fn handle(&self, request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
+///     async fn handle(&self, request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
 ///         Ok(http::Response::builder()
 ///             .status(200)
 ///             .body(BytesMut::from("Hello, World!"))
@@ -116,10 +122,11 @@ use bytes::BytesMut;
 ///
 /// struct StringHandler;
 ///
+/// #[async_trait::async_trait]
 /// impl Handler<String> for StringHandler {
 ///     type Error = std::convert::Infallible;
 ///
-///     fn handle(&self, request: http::Request<String>) -> Result<http::Response<String>, Self::Error> {
+///     async fn handle(&self, request: http::Request<String>) -> Result<http::Response<String>, Self::Error> {
 ///         let body = request.body();
 ///         let response_body = format!("You sent: {}", body);
 ///
@@ -130,12 +137,13 @@ use bytes::BytesMut;
 ///     }
 /// }
 /// ```
+#[async_trait::async_trait]
 pub trait Handler<B = BytesMut> {
     /// The error type returned by the handler
     type Error;
 
     /// Handle an HTTP request and produce a response
-    fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error>;
+    async fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error>;
 }
 
 #[cfg(test)]
@@ -149,10 +157,11 @@ mod tests {
     /// Example handler that echoes the request body
     pub struct EchoHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for EchoHandler {
         type Error = http::Error;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -162,15 +171,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_echo_handler() {
+    #[tokio::test]
+    async fn test_echo_handler() {
         let handler = EchoHandler;
         let request = http::Request::builder()
             .uri("/echo")
             .body(Bytes::from("Hello, world!"))
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), &Bytes::from("Hello, world!"));
     }
@@ -178,10 +187,11 @@ mod tests {
     /// Test handler that adds logging
     struct LoggingHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for LoggingHandler {
         type Error = String;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -199,8 +209,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_logging_handler() {
+    #[tokio::test]
+    async fn test_logging_handler() {
         let handler = LoggingHandler;
         let request = http::Request::builder()
             .method("POST")
@@ -208,7 +218,7 @@ mod tests {
             .body(Bytes::new())
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), &Bytes::from("OK"));
 
@@ -219,10 +229,11 @@ mod tests {
     /// Test handler that uses socket info
     struct SocketAwareHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for SocketAwareHandler {
         type Error = String;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -242,8 +253,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_socket_aware_handler() {
+    #[tokio::test]
+    async fn test_socket_aware_handler() {
         let handler = SocketAwareHandler;
 
         // Test without socket info
@@ -252,7 +263,7 @@ mod tests {
             .body(Bytes::new())
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.body(), &Bytes::from("No socket info"));
 
         // Test with socket info
@@ -265,7 +276,7 @@ mod tests {
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 5000);
         request.set_socket_info(SocketInfo::new(Some(local), Some(remote)));
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         let body_str = std::str::from_utf8(response.body()).unwrap();
         assert!(body_str.contains("127.0.0.1:8080"));
         assert!(body_str.contains("192.168.1.1:5000"));
@@ -274,10 +285,11 @@ mod tests {
     /// Test handler that returns errors
     struct ErrorHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for ErrorHandler {
         type Error = String;
 
-        fn handle(
+        async fn handle(
             &self,
             _request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -285,15 +297,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_error_handler() {
+    #[tokio::test]
+    async fn test_error_handler() {
         let handler = ErrorHandler;
         let request = http::Request::builder()
             .uri("/error")
             .body(Bytes::new())
             .unwrap();
 
-        let result = handler.handle(request);
+        let result = handler.handle(request).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), "Something went wrong");
     }
@@ -301,10 +313,11 @@ mod tests {
     /// Test handler that sets an exception
     struct ExceptionHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for ExceptionHandler {
         type Error = std::convert::Infallible;
 
-        fn handle(
+        async fn handle(
             &self,
             _request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -319,15 +332,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_exception_handler() {
+    #[tokio::test]
+    async fn test_exception_handler() {
         let handler = ExceptionHandler;
         let request = http::Request::builder()
             .uri("/fail")
             .body(Bytes::new())
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 500);
         assert_eq!(response.body(), &Bytes::from("Internal Server Error"));
 
@@ -338,10 +351,11 @@ mod tests {
     /// Test handler that works with String bodies
     struct StringBodyHandler;
 
+    #[async_trait::async_trait]
     impl Handler<String> for StringBodyHandler {
         type Error = std::convert::Infallible;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<String>,
         ) -> Result<http::Response<String>, Self::Error> {
@@ -355,15 +369,15 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_string_body_handler() {
+    #[tokio::test]
+    async fn test_string_body_handler() {
         let handler = StringBodyHandler;
         let request = http::Request::builder()
             .uri("/string")
             .body("hello world".to_string())
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 200);
         assert_eq!(response.body(), &Bytes::from("Received: HELLO WORLD"));
     }
@@ -416,10 +430,11 @@ mod tests {
     /// Generic echo handler that works with any cloneable body type
     pub struct GenericEchoHandler;
 
+    #[async_trait::async_trait]
     impl Handler<Bytes> for GenericEchoHandler {
         type Error = http::Error;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<Bytes>,
         ) -> Result<http::Response<Bytes>, Self::Error> {
@@ -429,10 +444,11 @@ mod tests {
         }
     }
 
+    #[async_trait::async_trait]
     impl Handler<Vec<u8>> for GenericEchoHandler {
         type Error = http::Error;
 
-        fn handle(
+        async fn handle(
             &self,
             request: http::Request<Vec<u8>>,
         ) -> Result<http::Response<Vec<u8>>, Self::Error> {
@@ -442,8 +458,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_generic_echo_handler() {
+    #[tokio::test]
+    async fn test_generic_echo_handler() {
         let handler = GenericEchoHandler;
 
         // Test with Bytes
@@ -452,7 +468,7 @@ mod tests {
             .body(Bytes::from("echo bytes"))
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.body(), &Bytes::from("echo bytes"));
 
         // Test with Vec<u8>
@@ -461,7 +477,7 @@ mod tests {
             .body(vec![72, 101, 108, 108, 111]) // "Hello" in ASCII
             .unwrap();
 
-        let response = handler.handle(request).unwrap();
+        let response = handler.handle(request).await.unwrap();
         assert_eq!(response.body(), &Bytes::from("Hello"));
     }
 }
