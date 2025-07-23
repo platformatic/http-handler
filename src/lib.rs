@@ -16,8 +16,8 @@ pub mod types;
 pub mod napi;
 
 pub use extensions::{
-    RequestBuilderExt, RequestExt, ResponseBuilderExt, ResponseException, ResponseExt, ResponseLog,
-    SocketInfo,
+    BodyBuffer, RequestBuilderExt, RequestExt, ResponseBuilderExt, ResponseException, ResponseExt,
+    ResponseLog, SocketInfo,
 };
 pub use handler::Handler;
 pub use types::{Request, Response};
