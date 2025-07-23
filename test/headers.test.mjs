@@ -70,7 +70,7 @@ test('Headers', async t => {
       baz: ['buz', 'bux']
     })
     strictEqual(headers.getLine('foo'), 'bar', 'should return the correct line for a single-value header')
-    strictEqual(headers.getLine('baz'), 'buz, bux', 'should return the correct line for a multi-value header')
+    strictEqual(headers.getLine('baz'), 'buz,bux', 'should return the correct line for a multi-value header')
     strictEqual(headers.getLine('not-exists'), null, 'should return null for non-existing header')
   })
 

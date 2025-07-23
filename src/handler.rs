@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(response.body(), &Bytes::from("OK"));
 
         let log = response.log().unwrap();
-        assert_eq!(log.as_bytes(), b"POST /api/users");
+        assert_eq!(log.as_bytes(), b"POST /api/users\n");
     }
 
     /// Test handler that uses socket info

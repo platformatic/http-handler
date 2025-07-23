@@ -95,9 +95,10 @@ impl ResponseLog {
         Self { buffer }
     }
 
-    /// Append data to the log
+    /// Append data to the log with a trailing newline
     pub fn append(&mut self, data: impl AsRef<[u8]>) {
         self.buffer.extend_from_slice(data.as_ref());
+        self.buffer.extend_from_slice(b"\n");
     }
 
     /// Get the log content as bytes
@@ -151,6 +152,63 @@ impl From<String> for ResponseException {
 impl From<&str> for ResponseException {
     fn from(s: &str) -> Self {
         Self(s.to_string())
+    }
+}
+
+/// Response body buffer for if you need to accumulate response
+/// body chunks before you're ready to build a response object.
+#[derive(Clone, Debug, Default)]
+pub struct BodyBuffer {
+    buffer: BytesMut,
+}
+
+impl BodyBuffer {
+    /// Create a new empty body
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a body with initial content
+    pub fn from_bytes(bytes: impl Into<Bytes>) -> Self {
+        let bytes = bytes.into();
+        let mut buffer = BytesMut::with_capacity(bytes.len());
+        buffer.extend_from_slice(&bytes);
+        Self { buffer }
+    }
+
+    /// Append data to the body
+    pub fn append(&mut self, data: impl AsRef<[u8]>) {
+        self.buffer.extend_from_slice(data.as_ref());
+    }
+
+    /// Get the body content as bytes
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.buffer
+    }
+
+    /// Convert the body to Bytes
+    pub fn into_bytes(self) -> Bytes {
+        self.buffer.freeze()
+    }
+
+    /// Convert the body to BytesMut
+    pub fn into_bytes_mut(self) -> BytesMut {
+        self.buffer
+    }
+
+    /// Get the length of the body
+    pub fn len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Check if the body is empty
+    pub fn is_empty(&self) -> bool {
+        self.buffer.is_empty()
+    }
+
+    /// Clear the body
+    pub fn clear(&mut self) {
+        self.buffer.clear();
     }
 }
 
@@ -298,6 +356,21 @@ pub trait ResponseBuilderExt {
 
     /// Set exception in response builder
     fn exception(self, exception: impl Into<String>) -> http::response::Builder;
+
+    /// Set body in response builder
+    fn body_buffer(self, body: BodyBuffer) -> http::response::Builder;
+
+    /// Get mutable access to the log extension
+    fn log_mut(&mut self) -> &mut ResponseLog;
+
+    /// Get mutable access to the body extension
+    fn body_buffer_mut(&mut self) -> &mut BodyBuffer;
+
+    /// Append to the log extension
+    fn append_log(&mut self, data: impl AsRef<[u8]>) -> &mut Self;
+
+    /// Append to the body extension
+    fn append_body(&mut self, data: impl AsRef<[u8]>) -> &mut Self;
 }
 
 impl ResponseBuilderExt for http::response::Builder {
@@ -307,6 +380,36 @@ impl ResponseBuilderExt for http::response::Builder {
 
     fn exception(self, exception: impl Into<String>) -> http::response::Builder {
         self.extension(ResponseException::new(exception))
+    }
+
+    fn body_buffer(self, body: BodyBuffer) -> http::response::Builder {
+        self.extension(body)
+    }
+
+    fn log_mut(&mut self) -> &mut ResponseLog {
+        let extensions = self.extensions_mut().unwrap();
+        if extensions.get::<ResponseLog>().is_none() {
+            extensions.insert(ResponseLog::new());
+        }
+        extensions.get_mut::<ResponseLog>().unwrap()
+    }
+
+    fn body_buffer_mut(&mut self) -> &mut BodyBuffer {
+        let extensions = self.extensions_mut().unwrap();
+        if extensions.get::<BodyBuffer>().is_none() {
+            extensions.insert(BodyBuffer::new());
+        }
+        extensions.get_mut::<BodyBuffer>().unwrap()
+    }
+
+    fn append_log(&mut self, data: impl AsRef<[u8]>) -> &mut Self {
+        self.log_mut().append(data);
+        self
+    }
+
+    fn append_body(&mut self, data: impl AsRef<[u8]>) -> &mut Self {
+        self.body_buffer_mut().append(data);
+        self
     }
 }
 
@@ -341,18 +444,34 @@ mod tests {
 
         log.append("Hello");
         log.append(" World");
-        assert_eq!(log.as_bytes(), b"Hello World");
-        assert_eq!(log.len(), 11);
+        assert_eq!(log.as_bytes(), b"Hello\n World\n");
+        assert_eq!(log.len(), 13);
         assert!(!log.is_empty());
 
         let bytes = log.clone().into_bytes();
-        assert_eq!(&bytes[..], b"Hello World");
+        assert_eq!(&bytes[..], b"Hello\n World\n");
 
         log.clear();
         assert!(log.is_empty());
 
         let log = ResponseLog::from_bytes("Initial content");
         assert_eq!(log.as_bytes(), b"Initial content");
+
+        // Test that newlines are always added
+        let mut log = ResponseLog::new();
+        log.append("Line with newline\n");
+        log.append("Line without newline");
+        assert_eq!(
+            log.as_bytes(),
+            b"Line with newline\n\nLine without newline\n"
+        );
+
+        // Test empty append also adds newline
+        log.append("");
+        assert_eq!(
+            log.as_bytes(),
+            b"Line with newline\n\nLine without newline\n\n"
+        );
     }
 
     #[test]
@@ -405,7 +524,7 @@ mod tests {
         response.append_log(" - more data");
         assert_eq!(
             response.log().unwrap().as_bytes(),
-            b"Initial log - more data"
+            b"Initial log - more data\n"
         );
 
         // Set exception
