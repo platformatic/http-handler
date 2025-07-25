@@ -95,9 +95,10 @@ impl ResponseLog {
         Self { buffer }
     }
 
-    /// Append data to the log
+    /// Append data to the log with a trailing newline
     pub fn append(&mut self, data: impl AsRef<[u8]>) {
         self.buffer.extend_from_slice(data.as_ref());
+        self.buffer.extend_from_slice(b"\n");
     }
 
     /// Get the log content as bytes
@@ -443,18 +444,34 @@ mod tests {
 
         log.append("Hello");
         log.append(" World");
-        assert_eq!(log.as_bytes(), b"Hello World");
-        assert_eq!(log.len(), 11);
+        assert_eq!(log.as_bytes(), b"Hello\n World\n");
+        assert_eq!(log.len(), 13);
         assert!(!log.is_empty());
 
         let bytes = log.clone().into_bytes();
-        assert_eq!(&bytes[..], b"Hello World");
+        assert_eq!(&bytes[..], b"Hello\n World\n");
 
         log.clear();
         assert!(log.is_empty());
 
         let log = ResponseLog::from_bytes("Initial content");
         assert_eq!(log.as_bytes(), b"Initial content");
+
+        // Test that newlines are always added
+        let mut log = ResponseLog::new();
+        log.append("Line with newline\n");
+        log.append("Line without newline");
+        assert_eq!(
+            log.as_bytes(),
+            b"Line with newline\n\nLine without newline\n"
+        );
+
+        // Test empty append also adds newline
+        log.append("");
+        assert_eq!(
+            log.as_bytes(),
+            b"Line with newline\n\nLine without newline\n\n"
+        );
     }
 
     #[test]
@@ -507,7 +524,7 @@ mod tests {
         response.append_log(" - more data");
         assert_eq!(
             response.log().unwrap().as_bytes(),
-            b"Initial log - more data"
+            b"Initial log - more data\n"
         );
 
         // Set exception

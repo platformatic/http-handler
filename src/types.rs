@@ -135,7 +135,7 @@ mod tests {
 
         assert_eq!(
             response.log().unwrap().as_bytes(),
-            b"Initial log - more info"
+            b"Initial log - more info\n"
         );
         assert_eq!(
             response.exception().unwrap().message(),

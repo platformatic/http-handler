@@ -12,12 +12,12 @@ test('Request', async t => {
     })
 
     throws(() => new Request({}), {
-      message: 'Missing field `uri`',
+      message: 'Missing field `url`',
     })
 
     doesNotThrow(() => new Request({
       method: 'GET',
-      uri: '/test.php',
+      url: 'https://example.com/test.php',
       headers: { 'Content-Type': 'application/json' },
       body: Buffer.from('Hello, World!')
     }), 'should construct with an object argument')
@@ -26,7 +26,7 @@ test('Request', async t => {
   await t.test('method', () => {
     const request = new Request({
       method: 'POST',
-      uri: '/test'
+      url: 'https://example.com/test'
     })
 
     strictEqual(request.method, 'POST', 'should set the method correctly')
@@ -34,21 +34,64 @@ test('Request', async t => {
     strictEqual(request.method, 'PUT', 'should allow method to be changed')
   })
 
-  await t.test('uri', () => {
+  await t.test('url', () => {
     const request = new Request({
       method: 'GET',
-      uri: '/test'
+      url: 'https://example.com/test'
     })
 
-    strictEqual(request.uri, '/test', 'should set the URI correctly')
-    request.uri = '/new-test'
-    strictEqual(request.uri, '/new-test', 'should allow URI to be changed')
+    strictEqual(request.url, 'https://example.com/test', 'should set the URL correctly')
+    request.url = 'https://example.com/new-test'
+    strictEqual(request.url, 'https://example.com/new-test', 'should allow URL to be changed')
+  })
+
+  await t.test('path', () => {
+    const request = new Request({
+      method: 'GET',
+      url: 'https://example.com/api/users?id=123'
+    })
+
+    strictEqual(request.path, '/api/users', 'should return just the path portion')
+    
+    // Test with a simple path-only URL
+    const simpleRequest = new Request({
+      method: 'GET',
+      url: '/simple-path'
+    })
+    strictEqual(simpleRequest.path, '/simple-path', 'should handle path-only URLs')
+  })
+
+  await t.test('url reconstruction from Host header', () => {
+    // Test that path-only URLs are reconstructed using Host header
+    const request = new Request({
+      method: 'GET',
+      url: '/api/data?param=value',
+      headers: {
+        'Host': 'api.example.com',
+        'Content-Type': 'application/json'
+      }
+    })
+
+    strictEqual(request.url, 'https://api.example.com/api/data?param=value', 'should reconstruct full URL from Host header')
+    strictEqual(request.path, '/api/data', 'should still return correct path portion')
+    
+    // Test that full URLs are not modified even with Host header
+    const fullUrlRequest = new Request({
+      method: 'GET', 
+      url: 'https://original.com/test',
+      headers: {
+        'Host': 'different.com'
+      }
+    })
+    
+    strictEqual(fullUrlRequest.url, 'https://original.com/test', 'should not modify full URLs based on Host header')
+    strictEqual(fullUrlRequest.path, '/test', 'should return correct path for full URL')
   })
 
   await t.test('headers', () => {
     const request = new Request({
       method: 'GET',
-      uri: '/test',
+      url: 'https://example.com/test',
       headers: {
         'Content-Type': 'application/json',
         'X-Custom-Header': 'CustomValue'
@@ -71,7 +114,7 @@ test('Request', async t => {
   await t.test('docroot', () => {
     const docroot = '/var/www/html'
     const request = new Request({
-      uri: '/test',
+      url: 'https://example.com/test',
       docroot
     })
 
@@ -84,7 +127,7 @@ test('Request', async t => {
     const body = Buffer.from('Hello, World!')
     const request = new Request({
       method: 'POST',
-      uri: '/test',
+      url: 'https://example.com/test',
       body
     })
 
@@ -98,14 +141,14 @@ test('Request', async t => {
   await t.test('toJSON', () => {
     const request = new Request({
       method: 'GET',
-      uri: '/test',
+      url: 'https://example.com/test',
       headers: { 'Content-Type': 'application/json' },
       body: Buffer.from('Hello, World!')
     })
 
     deepStrictEqual(request.toJSON(), {
       method: 'GET',
-      uri: '/test',
+      url: 'https://example.com/test',
       headers: { 'content-type': 'application/json' },
       body: Buffer.from('Hello, World!')
     }, 'should convert to JSON correctly')

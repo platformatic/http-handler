@@ -14,7 +14,7 @@ use napi_derive::napi;
 
 use crate::{
     Request as InnerRequest, RequestBuilderExt, RequestExt, Response as InnerResponse,
-    ResponseBuilderExt, SocketInfo as InnerSocketInfo,
+    ResponseBuilderExt, ResponseExt, SocketInfo as InnerSocketInfo,
 };
 
 //
@@ -301,7 +301,7 @@ impl Headers {
     /// headers.set('Accept', 'application/json');
     /// headers.set('Accept', 'text/html');
     ///
-    /// console.log(headers.getLine('Accept')); // application/json, text/html
+    /// console.log(headers.getLine('Accept')); // application/json,text/html
     /// ```
     #[napi]
     pub fn get_line(&self, key: String) -> Option<String> {
@@ -309,7 +309,7 @@ impl Headers {
         if values.is_empty() {
             None
         } else {
-            Some(values.join(", "))
+            Some(values.join(","))
         }
     }
 
@@ -569,8 +569,8 @@ impl Headers {
 pub struct RequestOptions {
     /// The HTTP method for the request.
     pub method: Option<String>,
-    /// The URI for the request.
-    pub uri: String,
+    /// The URL for the request.
+    pub url: String,
     /// The headers for the request.
     #[napi(ts_type = "Headers | HeaderMap")]
     pub headers: Option<Headers>,
@@ -616,9 +616,43 @@ impl Request {
             None => return Err(Error::new(Status::InvalidArg, "Missing `options` argument")),
         };
 
+        // Parse the initial URI to check if it's a full URL or just a path
+        let initial_uri: http::Uri = options
+            .url
+            .parse()
+            .map_err(|_| Error::new(Status::InvalidArg, "Invalid URL"))?;
+
+        let mut final_uri = initial_uri.clone();
+
+        // If we only have a path (no scheme/authority), try to reconstruct from Host header
+        if initial_uri.scheme().is_none() && initial_uri.authority().is_none() {
+            if let Some(ref headers) = options.headers {
+                if let Some(host_value) = headers.get("host".to_string()) {
+                    // Reconstruct the full URI using the Host header
+                    let scheme = "https"; // Default to HTTPS
+                    let full_url = format!(
+                        "{}://{}{}",
+                        scheme,
+                        host_value,
+                        initial_uri
+                            .path_and_query()
+                            .map(|pq| pq.as_str())
+                            .unwrap_or("/")
+                    );
+
+                    final_uri = full_url.parse().map_err(|_| {
+                        Error::new(
+                            Status::InvalidArg,
+                            "Invalid reconstructed URL from Host header",
+                        )
+                    })?;
+                }
+            }
+        }
+
         let mut request = RequestBuilder::new()
             .method(options.method.unwrap_or_else(|| "GET".to_string()).as_str())
-            .uri(&options.uri);
+            .uri(final_uri);
 
         if let Some(headers) = options.headers {
             for (key, value) in headers.iter() {
@@ -639,10 +673,7 @@ impl Request {
             .map(|body| BytesMut::from(body.deref()))
             .unwrap_or_default();
 
-        let request = request
-            .uri(options.uri.as_str())
-            .body(body)
-            .expect("Failed to build request");
+        let request = request.body(body).expect("Failed to build request");
 
         Ok(Request(request))
     }
@@ -654,7 +685,7 @@ impl Request {
     /// ```js
     /// const request = new Request({
     ///   method: "GET",
-    ///   uri: "/index.php"
+    ///   url: "/index.php"
     /// });
     ///
     /// console.log(request.method); // GET
@@ -670,7 +701,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///  uri: "/index.php"
+    ///  url: "/index.php"
     /// });
     ///
     /// request.method = "POST";
@@ -685,41 +716,57 @@ impl Request {
         Ok(())
     }
 
-    /// Get the URI for the request.
+    /// Get the full URL for the request, including scheme and authority.
     ///
     /// # Examples
     ///
     /// ```js
     /// const request = new Request({
-    ///   uri: "/index.php"
+    ///   url: "https://example.com/index.php"
     /// });
     ///
-    /// console.log(request.uri); // /index.php
+    /// console.log(request.url); // https://example.com/index.php
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn uri(&self) -> String {
+    pub fn url(&self) -> String {
         self.0.uri().to_string()
     }
 
-    /// Set the URI for the request.
+    /// Set the URL for the request.
     ///
     /// # Examples
     ///
     /// ```js
     /// const request = new Request({
-    ///  uri: "/index.php"
+    ///  url: "https://example.com/index.php"
     /// });
     ///
-    /// request.uri = "/new-uri";
-    /// console.log(request.uri); // /new-uri
+    /// request.url = "https://example.com/new-url";
+    /// console.log(request.url); // https://example.com/new-url
     /// ```
-    #[napi(setter, enumerable = true, js_name = "uri")]
-    pub fn set_uri(&mut self, uri: String) -> Result<()> {
-        *self.0.uri_mut() = uri
+    #[napi(setter, enumerable = true, js_name = "url")]
+    pub fn set_url(&mut self, url: String) -> Result<()> {
+        *self.0.uri_mut() = url
             .parse()
-            .map_err(|_| Error::new(Status::InvalidArg, "Invalid URI"))?;
+            .map_err(|_| Error::new(Status::InvalidArg, "Invalid URL"))?;
 
         Ok(())
+    }
+
+    /// Get the path portion of the URL for the request.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///   url: "https://example.com/api/users?id=123"
+    /// });
+    ///
+    /// console.log(request.path); // /api/users
+    /// ```
+    #[napi(getter, enumerable = true)]
+    pub fn path(&self) -> String {
+        self.0.uri().path().to_string()
     }
 
     /// Get the headers for the request.
@@ -728,7 +775,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///   uri: "/index.php",
+    ///   url: "/index.php",
     ///   headers: {
     ///     'Content-Type': ['application/json']
     ///   }
@@ -749,7 +796,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///  uri: "/index.php"
+    ///  url: "/index.php"
     /// });
     ///
     /// request.headers = new Headers({
@@ -771,7 +818,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///   uri: "/index.php",
+    ///   url: "/index.php",
     ///   docroot: "/var/www/html"
     /// });
     ///
@@ -788,7 +835,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///  uri: "/index.php"
+    ///  url: "/index.php"
     /// });
     ///
     /// request.docroot = "/var/www/html";
@@ -805,7 +852,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///   uri: "/v2/api/thing",
+    ///   url: "/v2/api/thing",
     ///   body: Buffer.from(JSON.stringify({
     ///     message: 'Hello, world!'
     ///   }))
@@ -824,7 +871,7 @@ impl Request {
     ///
     /// ```js
     /// const request = new Request({
-    ///  uri: "/v2/api/thing"
+    ///  url: "/v2/api/thing"
     /// });
     ///
     /// request.body = Buffer.from(JSON.stringify({
@@ -845,7 +892,7 @@ impl Request {
     /// ```js
     /// const request = new Request({
     ///   method: "GET",
-    ///   uri: "/index.php",
+    ///   url: "https://example.com/index.php",
     ///   headers: {
     ///     'Content-Type': ['application/json']
     ///   },
@@ -860,7 +907,7 @@ impl Request {
     pub fn to_json(&self, env: &Env) -> Result<Object> {
         let mut obj = Object::new(env)?;
         obj.set("method", self.method())?;
-        obj.set("uri", self.uri())?;
+        obj.set("url", self.url())?;
         obj.set("headers", self.headers().to_json(env)?)?;
         obj.set("body", self.body())?;
         Ok(obj)
@@ -916,6 +963,8 @@ pub struct ResponseOptions {
     pub body: Option<Buffer>,
     /// The log output for the request.
     pub log: Option<Buffer>,
+    /// The exception output for the request.
+    pub exception: Option<String>,
 }
 
 /// Wraps an http::Response instance to expose it to JavaScript.
@@ -977,6 +1026,10 @@ impl Response {
 
         if let Some(log) = options.log {
             builder = builder.log(BytesMut::from(log.deref()));
+        }
+
+        if let Some(exception) = options.exception {
+            builder = builder.exception(exception);
         }
 
         let body = options
@@ -1112,6 +1165,41 @@ impl Response {
         *self.0.body_mut() = BytesMut::from(body.deref());
     }
 
+    /// Get the log of the response as a Buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const response = new Response({
+    ///   log: Buffer.from('Log message')
+    /// });
+    ///
+    /// console.log(response.log.toString()); // Log message
+    /// ```
+    #[napi(getter, enumerable = true)]
+    pub fn log(&self) -> Buffer {
+        self.0
+            .log()
+            .map(|log| Buffer::from(log.as_bytes().to_vec()))
+            .unwrap_or_else(|| Buffer::from(vec![]))
+    }
+
+    /// Get the exception of the response.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const response = new Response({
+    ///   exception: 'Error message'
+    /// });
+    ///
+    /// console.log(response.exception); // Error message
+    /// ```
+    #[napi(getter, enumerable = true)]
+    pub fn exception(&self) -> Option<String> {
+        self.0.exception().map(|e| e.0.clone())
+    }
+
     /// Convert the response to a JSON object representation.
     ///
     /// # Examples
@@ -1135,6 +1223,19 @@ impl Response {
         obj.set("status", self.status())?;
         obj.set("headers", self.headers().to_json(env)?)?;
         obj.set("body", self.body())?;
+
+        // Only include log if it has content
+        if let Some(log) = self.0.log() {
+            if !log.is_empty() {
+                obj.set("log", Buffer::from(log.as_bytes().to_vec()))?;
+            }
+        }
+
+        // Include exception if present
+        if let Some(exception) = self.0.exception() {
+            obj.set("exception", exception.0.clone())?;
+        }
+
         Ok(obj)
     }
 }
