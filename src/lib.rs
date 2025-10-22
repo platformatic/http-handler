@@ -9,6 +9,7 @@ pub use http::*;
 
 pub mod extensions;
 pub mod handler;
+pub mod stream_handle;
 pub mod types;
 
 /// Provides N-API bindings to expose the `http` crate types to Node.js.
@@ -20,4 +21,5 @@ pub use extensions::{
     ResponseLog, SocketInfo,
 };
 pub use handler::Handler;
+pub use stream_handle::{StreamChunk, StreamError, StreamHandle};
 pub use types::{Request, Response};

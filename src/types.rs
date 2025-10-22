@@ -1,13 +1,13 @@
 //! Core type aliases and implementations for v2
 
 use super::extensions::{RequestExt, ResponseExt, SocketInfo};
-use bytes::BytesMut;
+use super::stream_handle::StreamHandle;
 
-/// Type alias for HTTP Request with BytesMut body
-pub type Request = http::Request<BytesMut>;
+/// Type alias for HTTP Request with StreamHandle body
+pub type Request = http::Request<StreamHandle>;
 
-/// Type alias for HTTP Response with BytesMut body
-pub type Response = http::Response<BytesMut>;
+/// Type alias for HTTP Response with StreamHandle body
+pub type Response = http::Response<StreamHandle>;
 
 /// Helper functions for building requests with extensions
 pub mod request {
@@ -46,28 +46,31 @@ pub mod response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use http::{Method, StatusCode};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     #[test]
     fn test_request_type_alias() {
+        let body = StreamHandle::from_bytes(Bytes::from("request body"), false);
         let request = http::Request::builder()
             .method(Method::GET)
             .uri("/test")
-            .body(BytesMut::from("request body"))
+            .body(body)
             .unwrap();
 
         assert_eq!(request.method(), Method::GET);
         assert_eq!(request.uri().path(), "/test");
-        assert_eq!(request.body(), &BytesMut::from("request body"));
+        assert!(!request.body().is_websocket());
     }
 
     #[test]
     fn test_response_type_alias() {
+        let body = StreamHandle::new(false);
         let response = http::Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain")
-            .body(BytesMut::from("response body"))
+            .body(body)
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -75,14 +78,15 @@ mod tests {
             response.headers().get("content-type").unwrap(),
             "text/plain"
         );
-        assert_eq!(response.body(), &BytesMut::from("response body"));
+        assert!(!response.body().is_websocket());
     }
 
     #[test]
     fn test_request_with_socket_info() {
+        let body = StreamHandle::new(false);
         let request = http::Request::builder()
             .uri("/test")
-            .body(BytesMut::new())
+            .body(body)
             .unwrap();
 
         let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
@@ -97,9 +101,10 @@ mod tests {
 
     #[test]
     fn test_response_with_log() {
+        let body = StreamHandle::new(false);
         let response = http::Response::builder()
             .status(StatusCode::OK)
-            .body(BytesMut::new())
+            .body(body)
             .unwrap();
 
         let response = response::with_log(response, "Test log message");
@@ -110,9 +115,10 @@ mod tests {
 
     #[test]
     fn test_response_with_exception() {
+        let body = StreamHandle::new(false);
         let response = http::Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(BytesMut::new())
+            .body(body)
             .unwrap();
 
         let response = response::with_exception(response, "Something went wrong");
@@ -124,9 +130,10 @@ mod tests {
     #[test]
     fn test_combined_extensions() {
         // Test that we can use multiple extensions together
+        let body = StreamHandle::new(false);
         let mut response = http::Response::builder()
             .status(StatusCode::OK)
-            .body(BytesMut::from("body"))
+            .body(body)
             .unwrap();
 
         response.set_log("Initial log");

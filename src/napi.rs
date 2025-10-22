@@ -4,7 +4,7 @@ use std::{
     ops::{Deref, DerefMut},
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use http::{
     HeaderMap as HttpHeaderMap, HeaderName, HeaderValue as HttpHeaderValue,
     request::Builder as RequestBuilder, response::Builder as ResponseBuilder,
@@ -14,7 +14,7 @@ use napi_derive::napi;
 
 use crate::{
     Request as InnerRequest, RequestBuilderExt, RequestExt, Response as InnerResponse,
-    ResponseBuilderExt, ResponseExt, SocketInfo as InnerSocketInfo,
+    ResponseBuilderExt, ResponseExt, SocketInfo as InnerSocketInfo, StreamHandle,
 };
 
 //
@@ -583,6 +583,8 @@ pub struct RequestOptions {
     pub socket: Option<SocketInfo>,
     /// Document root for the request, if applicable.
     pub docroot: Option<String>,
+    /// Whether this is a WebSocket request.
+    pub websocket: Option<bool>,
 }
 
 /// Wraps an http::Request instance to expose it to JavaScript.
@@ -671,10 +673,16 @@ impl Request {
             request = request.document_root(docroot.into());
         }
 
-        let body = options
-            .body
-            .map(|body| BytesMut::from(body.deref()))
-            .unwrap_or_default();
+        // Create stream handle with optional body
+        let websocket = options.websocket.unwrap_or(false);
+        let body = if let Some(body_buf) = options.body {
+            StreamHandle::from_bytes(Bytes::copy_from_slice(body_buf.as_ref()), websocket)
+        } else {
+            let handle = StreamHandle::new(websocket);
+            // For empty body requests, send End marker immediately so forwarding tasks don't wait forever
+            handle.send_empty_body();
+            handle
+        };
 
         let request = request.body(body).expect("Failed to build request");
 
@@ -863,30 +871,9 @@ impl Request {
     ///
     /// console.log(request.body.toString()); // {"message":"Hello, world!"}
     /// ```
-    #[napi(getter, enumerable = true)]
-    pub fn body(&self) -> Buffer {
-        Buffer::from(self.0.body().to_vec())
-    }
-
-    /// Set the body of the request.
-    ///
-    /// # Examples
-    ///
-    /// ```js
-    /// const request = new Request({
-    ///  url: "/v2/api/thing"
-    /// });
-    ///
-    /// request.body = Buffer.from(JSON.stringify({
-    ///   message: 'Hello, world!'
-    /// }));
-    ///
-    /// console.log(request.body.toString()); // {"message":"Hello, world!"}
-    /// ```
-    #[napi(setter, enumerable = true, js_name = "body")]
-    pub fn set_body(&mut self, body: Buffer) {
-        *self.0.body_mut() = BytesMut::from(body.deref());
-    }
+    // Note: Request body getter/setter removed for streaming API.
+    // Use write() and end() methods to write request body chunks.
+    // Initial body can be provided in the constructor.
 
     /// Convert the response to a JSON object representation.
     ///
@@ -912,8 +899,68 @@ impl Request {
         obj.set("method", self.method())?;
         obj.set("url", self.url())?;
         obj.set("headers", self.headers().to_json(env)?)?;
-        obj.set("body", self.body())?;
+        // Note: body not included in JSON for streaming requests
         Ok(obj)
+    }
+
+    /// Write a chunk to the request body stream
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///   method: "POST",
+    ///   url: "/upload"
+    /// });
+    ///
+    /// await request.write(Buffer.from('chunk 1'));
+    /// await request.write('chunk 2');
+    /// await request.end();
+    /// ```
+    #[napi]
+    pub async fn write(&self, chunk: Either<Buffer, String>) -> Result<()> {
+        let bytes = match chunk {
+            Either::A(buf) => Bytes::copy_from_slice(buf.as_ref()),
+            Either::B(s) => Bytes::from(s),
+        };
+
+        self.0
+            .body()
+            .write(bytes)
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// End the request body stream (HTTP mode only)
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///   method: "POST",
+    ///   url: "/upload"
+    /// });
+    ///
+    /// await request.write(Buffer.from('data'));
+    /// await request.end();
+    /// ```
+    #[napi]
+    pub async fn end(&self) -> Result<()> {
+        self.0
+            .body()
+            .end()
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Get the inner Request
+    pub fn inner(&self) -> &InnerRequest {
+        &self.0
+    }
+
+    /// Consume this Request and return the inner Request
+    pub fn into_inner(self) -> InnerRequest {
+        self.0
     }
 }
 
@@ -976,7 +1023,7 @@ impl FromNapiValue for Request {
             return Ok(instance.deref().clone());
         }
 
-        // If both conversions fail, return an error
+        // If conversion fails, return an error
         Err(Error::new(Status::InvalidArg, "Expected Request"))
     }
 }
@@ -1067,10 +1114,12 @@ impl Response {
             builder = builder.exception(exception);
         }
 
-        let body = options
-            .body
-            .map(|body| BytesMut::from(body.deref()))
-            .unwrap_or_default();
+        // Create stream handle with optional body
+        let body = if let Some(body_buf) = options.body {
+            StreamHandle::from_bytes(Bytes::copy_from_slice(body_buf.as_ref()), false)
+        } else {
+            StreamHandle::new(false)
+        };
 
         let response = builder.body(body).map_err(|e| {
             Error::new(
@@ -1164,40 +1213,32 @@ impl Response {
         *self.0.headers_mut() = headers.deref().clone();
     }
 
-    /// Get the body of the response as a Buffer.
+    /// Get the buffered body of the response as a Buffer.
+    ///
+    /// Returns `undefined` if the response was not buffered (e.g., from handleStream).
+    /// Only available after handleRequest, which pre-buffers the response.
     ///
     /// # Examples
     ///
     /// ```js
-    /// const response = new Response({
-    ///   body: Buffer.from(JSON.stringify({
-    ///     message: 'Hello, world!'
-    ///   }))
-    /// });
+    /// // After handleRequest (buffered)
+    /// const response = await python.handleRequest(request);
+    /// console.log(response.body.toString()); // Works - body is buffered
     ///
-    /// console.log(response.body.toString()); // {"message":"Hello, world!"}
+    /// // After handleStream (not buffered)
+    /// const response = await python.handleStream(request);
+    /// console.log(response.body); // undefined - must use AsyncIterator
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn body(&self) -> Buffer {
-        Buffer::from(self.0.body().to_vec())
-    }
+    pub fn body(&self) -> Option<Buffer> {
+        // Check if buffered (sync check)
+        if !self.0.body().is_buffered() {
+            return None;
+        }
 
-    /// Set the body of the response.
-    ///
-    /// # Examples
-    ///
-    /// ```js
-    /// const response = new Response();
-    ///
-    /// response.body = Buffer.from(JSON.stringify({
-    ///   message: 'Hello, world!'
-    /// }));
-    ///
-    /// console.log(response.body.toString()); // {"message":"Hello, world!"}
-    /// ```
-    #[napi(setter, enumerable = true, js_name = "body")]
-    pub fn set_body(&mut self, body: Buffer) {
-        *self.0.body_mut() = BytesMut::from(body.deref());
+        // Get buffered bytes synchronously (safe because we use StdMutex)
+        let bytes = self.0.body().buffered_bytes_sync()?;
+        Some(Buffer::from(bytes.as_ref()))
     }
 
     /// Get the log of the response as a Buffer.
@@ -1292,5 +1333,45 @@ impl DerefMut for Response {
 impl From<InnerResponse> for Response {
     fn from(response: InnerResponse) -> Self {
         Response(response)
+    }
+}
+
+#[napi]
+impl Response {
+    /// Read the next chunk from the response body stream
+    ///
+    /// Returns the next chunk as a Buffer, or undefined if the stream has ended.
+    /// This method is used to implement AsyncIterator in JavaScript.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// // Implement AsyncIterator in JavaScript
+    /// Response.prototype[Symbol.asyncIterator] = async function* () {
+    ///   while (true) {
+    ///     const chunk = await this.next();
+    ///     if (chunk === undefined) break;
+    ///     yield chunk;
+    ///   }
+    /// };
+    ///
+    /// // Now you can use for await
+    /// for await (const chunk of response) {
+    ///   console.log(chunk.toString());
+    /// }
+    /// ```
+    #[napi]
+    pub async fn next(&self) -> Result<Option<Buffer>> {
+        match self.0.body().read().await {
+            Some(Ok(bytes)) => {
+                if bytes.is_empty() {
+                    Ok(None)
+                } else {
+                    Ok(Some(Buffer::from(bytes.to_vec())))
+                }
+            }
+            Some(Err(e)) => Err(Error::from_reason(e)),
+            None => Ok(None),
+        }
     }
 }
