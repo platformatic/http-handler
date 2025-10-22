@@ -57,9 +57,6 @@ test('Response', async t => {
 
     ok(response.body instanceof Buffer, 'should create Buffer instance for body')
     strictEqual(response.body.toString('utf8'), 'Hello, World!', 'should set the body correctly')
-
-    response.body = Buffer.from('New body content')
-    strictEqual(response.body.toString('utf8'), 'New body content', 'should update the body content correctly')
   })
 
   await t.test('toJSON', () => {

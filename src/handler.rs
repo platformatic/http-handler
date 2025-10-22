@@ -9,19 +9,29 @@
 //! ## Basic handler implementation
 //!
 //! ```
-//! use http_handler::Handler;
-//! use bytes::BytesMut;
+//! use http_handler::{Handler, Request, Response};
+//! use bytes::Bytes;
+//! use tokio::io::AsyncWriteExt;
 //!
 //! struct HelloHandler;
 //!
 //! impl Handler for HelloHandler {
 //!     type Error = std::convert::Infallible;
 //!
-//!     async fn handle(&self, _request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
+//!     async fn handle(&self, request: Request) -> Result<Response, Self::Error> {
+//!         let (_parts, body) = request.into_parts();
+//!         let response_body = body.create_response();
+//!
+//!         let mut response_writer = response_body.clone();
+//!         tokio::spawn(async move {
+//!             let _ = response_writer.write_all(b"Hello, World!").await;
+//!             let _ = response_writer.shutdown().await;
+//!         });
+//!
 //!         Ok(http::Response::builder()
 //!             .status(200)
 //!             .header("Content-Type", "text/plain")
-//!             .body(BytesMut::from("Hello, World!"))
+//!             .body(response_body)
 //!             .unwrap())
 //!     }
 //! }
@@ -30,8 +40,9 @@
 //! ## Handler composition
 //!
 //! ```
-//! use http_handler::Handler;
-//! use bytes::BytesMut;
+//! use http_handler::{Handler, Request, Response, RequestBody, ResponseBody};
+//! use bytes::Bytes;
+//! use tokio::io::AsyncWriteExt;
 //!
 //! // Middleware that adds a header
 //! struct AddHeaderHandler<H> {
@@ -40,14 +51,16 @@
 //!     header_value: &'static str,
 //! }
 //!
-//! impl<H, B> Handler<B> for AddHeaderHandler<H>
+//! impl<H> Handler for AddHeaderHandler<H>
 //! where
-//!     H: Handler<B> + std::marker::Sync,
-//!     B: std::marker::Send
+//!     H: Handler + std::marker::Sync,
 //! {
 //!     type Error = H::Error;
 //!
-//!     async fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error> {
+//!     async fn handle(
+//!         &self,
+//!         request: http::Request<RequestBody>
+//!     ) -> Result<http::Response<ResponseBody>, Self::Error> {
 //!         let mut response = self.inner.handle(request).await?;
 //!         response.headers_mut().insert(
 //!             self.header_name,
@@ -62,10 +75,19 @@
 //!
 //! impl Handler for ApiHandler {
 //!     type Error = std::convert::Infallible;
-//!     async fn handle(&self, _req: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
+//!     async fn handle(&self, request: Request) -> Result<Response, Self::Error> {
+//!         let (_parts, body) = request.into_parts();
+//!         let response_body = body.create_response();
+//!
+//!         let mut response_writer = response_body.clone();
+//!         tokio::spawn(async move {
+//!             let _ = response_writer.write_all(br#"{"status": "ok"}"#).await;
+//!             let _ = response_writer.shutdown().await;
+//!         });
+//!
 //!         Ok(http::Response::builder()
 //!             .status(200)
-//!             .body(BytesMut::from(r#"{"status": "ok"}"#))
+//!             .body(response_body)
 //!             .unwrap())
 //!     }
 //! }
@@ -77,53 +99,35 @@
 //! };
 //! ```
 
-use bytes::BytesMut;
-
 /// Trait for types that can handle HTTP requests and produce responses
 ///
-/// The handler trait is generic over the request body type `B`, allowing
-/// handlers to work with different body representations such as `Bytes`,
-/// `String`, streaming bodies, or custom types.
-///
-/// The response body type is fixed to `Bytes` for simplicity, but handlers
-/// can be composed with body transformers if different response types are needed.
+/// The handler trait works with duplex stream-based request and response bodies,
+/// providing efficient bidirectional I/O with configurable buffer sizes for
+/// backpressure control.
 ///
 /// # Examples
 ///
-/// ## Handler for Bytes body (default)
+/// ## Basic handler
 ///
 /// ```
-/// use http_handler::Handler;
-/// use bytes::BytesMut;
+/// use http_handler::{Handler, Request, Response};
+/// use bytes::Bytes;
+/// use tokio::io::AsyncWriteExt;
 ///
 /// struct MyHandler;
 ///
 /// impl Handler for MyHandler {
 ///     type Error = std::convert::Infallible;
 ///
-///     async fn handle(&self, request: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
-///         Ok(http::Response::builder()
-///             .status(200)
-///             .body(BytesMut::from("Hello, World!"))
-///             .unwrap())
-///     }
-/// }
-/// ```
+///     async fn handle(&self, request: Request) -> Result<Response, Self::Error> {
+///         let (_parts, body) = request.into_parts();
+///         let response_body = body.create_response();
 ///
-/// ## Handler for String body
-///
-/// ```
-/// use http_handler::Handler;
-/// use bytes::BytesMut;
-///
-/// struct StringHandler;
-///
-/// impl Handler<String> for StringHandler {
-///     type Error = std::convert::Infallible;
-///
-///     async fn handle(&self, request: http::Request<String>) -> Result<http::Response<String>, Self::Error> {
-///         let body = request.body();
-///         let response_body = format!("You sent: {}", body);
+///         let mut response_writer = response_body.clone();
+///         tokio::spawn(async move {
+///             let _ = response_writer.write_all(b"Hello, World!").await;
+///             let _ = response_writer.shutdown().await;
+///         });
 ///
 ///         Ok(http::Response::builder()
 ///             .status(200)
@@ -132,12 +136,16 @@ use bytes::BytesMut;
 ///     }
 /// }
 /// ```
-pub trait Handler<B = BytesMut> {
+pub trait Handler {
     /// The error type returned by the handler
     type Error;
 
     /// Handle an HTTP request and produce a response
-    async fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error>;
+    #[allow(async_fn_in_trait)]
+    async fn handle(
+        &self,
+        request: http::Request<crate::RequestBody>,
+    ) -> Result<http::Response<crate::ResponseBody>, Self::Error>;
 }
 
 #[cfg(test)]
@@ -145,54 +153,91 @@ mod tests {
     use super::*;
     use crate::extensions::SocketInfo;
     use crate::extensions::{RequestExt, ResponseExt};
-    use bytes::Bytes;
+    use bytes::{Bytes, BytesMut};
+    use http_body_util::BodyExt;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     /// Example handler that echoes the request body
     pub struct EchoHandler;
 
-    impl Handler<Bytes> for EchoHandler {
+    impl Handler for EchoHandler {
         type Error = http::Error;
 
-        async fn handle(
-            &self,
-            request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
-            http::Response::builder()
-                .status(200)
-                .body(request.body().clone())
+        async fn handle(&self, request: crate::Request) -> Result<crate::Response, Self::Error> {
+            let (_parts, mut body) = request.into_parts();
+            let response_body = body.create_response();
+
+            // Spawn task to echo request to response
+            let mut response_writer = response_body.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncReadExt;
+                use tokio::io::AsyncWriteExt;
+                let mut buffer = vec![0u8; 8192];
+                loop {
+                    let n = body.read(&mut buffer).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    let _ = response_writer.write_all(&buffer[..n]).await;
+                }
+                let _ = response_writer.shutdown().await;
+            });
+
+            http::Response::builder().status(200).body(response_body)
         }
     }
 
     #[tokio::test]
     async fn test_echo_handler() {
         let handler = EchoHandler;
-        let request = http::Request::builder()
-            .uri("/echo")
-            .body(Bytes::from("Hello, world!"))
+        let body = crate::RequestBody::from_data(Bytes::from("Hello, world!"))
+            .await
             .unwrap();
+        let request = http::Request::builder().uri("/echo").body(body).unwrap();
 
         let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(response.body(), &Bytes::from("Hello, world!"));
+
+        // Read the response body
+        let (_, mut response_body) = response.into_parts();
+        let mut collected = BytesMut::new();
+        while let Some(result) = response_body.frame().await {
+            match result {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        collected.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(&collected[..], b"Hello, world!");
     }
 
     /// Test handler that adds logging
     struct LoggingHandler;
 
-    impl Handler<Bytes> for LoggingHandler {
+    impl Handler for LoggingHandler {
         type Error = String;
 
-        async fn handle(
-            &self,
-            request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
-            let method = request.method();
-            let uri = request.uri();
+        async fn handle(&self, request: crate::Request) -> Result<crate::Response, Self::Error> {
+            let method = request.method().clone();
+            let uri = request.uri().clone();
+            let (_, body) = request.into_parts();
+
+            let response_body = body.create_response();
+
+            // Send OK response
+            let mut response_writer = response_body.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = response_writer.write_all(b"OK").await;
+                let _ = response_writer.shutdown().await;
+            });
 
             let mut response = http::Response::builder()
                 .status(200)
-                .body(Bytes::from("OK"))
+                .body(response_body)
                 .unwrap();
 
             response.append_log(format!("{} {}", method, uri));
@@ -204,42 +249,63 @@ mod tests {
     #[tokio::test]
     async fn test_logging_handler() {
         let handler = LoggingHandler;
+        let body = crate::RequestBody::new();
         let request = http::Request::builder()
             .method("POST")
             .uri("/api/users")
-            .body(Bytes::new())
+            .body(body)
             .unwrap();
 
         let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 200);
-        assert_eq!(response.body(), &Bytes::from("OK"));
 
         let log = response.log().unwrap();
         assert_eq!(log.as_bytes(), b"POST /api/users\n");
+
+        // Read the response body
+        let (_, mut response_body) = response.into_parts();
+        let mut collected = BytesMut::new();
+        while let Some(result) = response_body.frame().await {
+            match result {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        collected.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(&collected[..], b"OK");
     }
 
     /// Test handler that uses socket info
     struct SocketAwareHandler;
 
-    impl Handler<Bytes> for SocketAwareHandler {
+    impl Handler for SocketAwareHandler {
         type Error = String;
 
-        async fn handle(
-            &self,
-            request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
-            let socket_info = request.socket_info();
+        async fn handle(&self, request: crate::Request) -> Result<crate::Response, Self::Error> {
+            let socket_info = request.socket_info().cloned();
+            let (_, body) = request.into_parts();
+            let response_body = body.create_response();
 
-            let body = match socket_info {
+            let body_text = match socket_info {
                 Some(info) => {
                     format!("Local: {:?}, Remote: {:?}", info.local, info.remote)
                 }
                 None => "No socket info".to_string(),
             };
 
+            let mut response_writer = response_body.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = response_writer.write_all(body_text.as_bytes()).await;
+                let _ = response_writer.shutdown().await;
+            });
+
             Ok(http::Response::builder()
                 .status(200)
-                .body(Bytes::from(body))
+                .body(response_body)
                 .unwrap())
         }
     }
@@ -249,26 +315,46 @@ mod tests {
         let handler = SocketAwareHandler;
 
         // Test without socket info
-        let request = http::Request::builder()
-            .uri("/test")
-            .body(Bytes::new())
-            .unwrap();
+        let body = crate::RequestBody::new();
+        let request = http::Request::builder().uri("/test").body(body).unwrap();
 
         let response = handler.handle(request).await.unwrap();
-        assert_eq!(response.body(), &Bytes::from("No socket info"));
+        let (_, mut response_body) = response.into_parts();
+        let mut collected = BytesMut::new();
+        while let Some(result) = response_body.frame().await {
+            match result {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        collected.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        assert_eq!(&collected[..], b"No socket info");
 
         // Test with socket info
-        let mut request = http::Request::builder()
-            .uri("/test")
-            .body(Bytes::new())
-            .unwrap();
+        let body = crate::RequestBody::new();
+        let mut request = http::Request::builder().uri("/test").body(body).unwrap();
 
         let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 5000);
         request.set_socket_info(SocketInfo::new(Some(local), Some(remote)));
 
         let response = handler.handle(request).await.unwrap();
-        let body_str = std::str::from_utf8(response.body()).unwrap();
+        let (_, mut response_body) = response.into_parts();
+        let mut collected = BytesMut::new();
+        while let Some(result) = response_body.frame().await {
+            match result {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        collected.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        let body_str = std::str::from_utf8(&collected).unwrap();
         assert!(body_str.contains("127.0.0.1:8080"));
         assert!(body_str.contains("192.168.1.1:5000"));
     }
@@ -276,13 +362,10 @@ mod tests {
     /// Test handler that returns errors
     struct ErrorHandler;
 
-    impl Handler<Bytes> for ErrorHandler {
+    impl Handler for ErrorHandler {
         type Error = String;
 
-        async fn handle(
-            &self,
-            _request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
+        async fn handle(&self, _request: crate::Request) -> Result<crate::Response, Self::Error> {
             Err("Something went wrong".to_string())
         }
     }
@@ -290,10 +373,8 @@ mod tests {
     #[tokio::test]
     async fn test_error_handler() {
         let handler = ErrorHandler;
-        let request = http::Request::builder()
-            .uri("/error")
-            .body(Bytes::new())
-            .unwrap();
+        let body = crate::RequestBody::new();
+        let request = http::Request::builder().uri("/error").body(body).unwrap();
 
         let result = handler.handle(request).await;
         assert!(result.is_err());
@@ -303,16 +384,23 @@ mod tests {
     /// Test handler that sets an exception
     struct ExceptionHandler;
 
-    impl Handler<Bytes> for ExceptionHandler {
+    impl Handler for ExceptionHandler {
         type Error = std::convert::Infallible;
 
-        async fn handle(
-            &self,
-            _request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
+        async fn handle(&self, request: crate::Request) -> Result<crate::Response, Self::Error> {
+            let (_, body) = request.into_parts();
+            let response_body = body.create_response();
+
+            let mut response_writer = response_body.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncWriteExt;
+                let _ = response_writer.write_all(b"Internal Server Error").await;
+                let _ = response_writer.shutdown().await;
+            });
+
             let mut response = http::Response::builder()
                 .status(500)
-                .body(Bytes::from("Internal Server Error"))
+                .body(response_body)
                 .unwrap();
 
             response.set_exception("Database connection failed");
@@ -324,146 +412,27 @@ mod tests {
     #[tokio::test]
     async fn test_exception_handler() {
         let handler = ExceptionHandler;
-        let request = http::Request::builder()
-            .uri("/fail")
-            .body(Bytes::new())
-            .unwrap();
+        let body = crate::RequestBody::new();
+        let request = http::Request::builder().uri("/fail").body(body).unwrap();
 
         let response = handler.handle(request).await.unwrap();
         assert_eq!(response.status(), 500);
-        assert_eq!(response.body(), &Bytes::from("Internal Server Error"));
 
         let exception = response.exception().unwrap();
         assert_eq!(exception.message(), "Database connection failed");
-    }
 
-    /// Test handler that works with String bodies
-    struct StringBodyHandler;
-
-    impl Handler<String> for StringBodyHandler {
-        type Error = std::convert::Infallible;
-
-        async fn handle(
-            &self,
-            request: http::Request<String>,
-        ) -> Result<http::Response<String>, Self::Error> {
-            let body = request.body();
-            let response_body = format!("Received: {}", body.to_uppercase());
-
-            Ok(http::Response::builder()
-                .status(200)
-                .body(response_body)
-                .unwrap())
+        let (_, mut response_body) = response.into_parts();
+        let mut collected = BytesMut::new();
+        while let Some(result) = response_body.frame().await {
+            match result {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        collected.extend_from_slice(&data);
+                    }
+                }
+                Err(_) => break,
+            }
         }
-    }
-
-    #[tokio::test]
-    async fn test_string_body_handler() {
-        let handler = StringBodyHandler;
-        let request = http::Request::builder()
-            .uri("/string")
-            .body("hello world".to_string())
-            .unwrap();
-
-        let response = handler.handle(request).await.unwrap();
-        assert_eq!(response.status(), 200);
-        assert_eq!(response.body(), &Bytes::from("Received: HELLO WORLD"));
-    }
-
-    // /// Test generic handler with different body types
-    // struct TypeAwareHandler;
-
-    // impl<B: std::fmt::Debug> Handler<B> for TypeAwareHandler {
-    //     type Error = std::convert::Infallible;
-
-    //     fn handle(&self, request: http::Request<B>) -> Result<http::Response<B>, Self::Error> {
-    //         let type_name = std::any::type_name::<B>();
-    //         let body_debug = format!("{:?}", request.body());
-    //         let response_body = format!("Type: {}\nBody: {}", type_name, body_debug);
-
-    //         Ok(http::Response::builder()
-    //             .status(200)
-    //             .body(response_body)
-    //             .unwrap())
-    //     }
-    // }
-
-    // #[test]
-    // fn test_type_aware_handler() {
-    //     let handler = TypeAwareHandler;
-
-    //     // Test with String body
-    //     let request = http::Request::builder()
-    //         .uri("/type")
-    //         .body("test string".to_string())
-    //         .unwrap();
-
-    //     let response = handler.handle(request).unwrap();
-    //     let body_str = std::str::from_utf8(response.body()).unwrap();
-    //     assert!(body_str.contains("alloc::string::String"));
-    //     assert!(body_str.contains("test string"));
-
-    //     // Test with Vec<u8> body
-    //     let request = http::Request::builder()
-    //         .uri("/type")
-    //         .body(vec![1u8, 2, 3, 4])
-    //         .unwrap();
-
-    //     let response = handler.handle(request).unwrap();
-    //     let body_str = std::str::from_utf8(response.body()).unwrap();
-    //     assert!(body_str.contains("vec::Vec<u8>"));
-    //     assert!(body_str.contains("[1, 2, 3, 4]"));
-    // }
-
-    /// Generic echo handler that works with any cloneable body type
-    pub struct GenericEchoHandler;
-
-    impl Handler<Bytes> for GenericEchoHandler {
-        type Error = http::Error;
-
-        async fn handle(
-            &self,
-            request: http::Request<Bytes>,
-        ) -> Result<http::Response<Bytes>, Self::Error> {
-            http::Response::builder()
-                .status(200)
-                .body(request.into_body())
-        }
-    }
-
-    impl Handler<Vec<u8>> for GenericEchoHandler {
-        type Error = http::Error;
-
-        async fn handle(
-            &self,
-            request: http::Request<Vec<u8>>,
-        ) -> Result<http::Response<Vec<u8>>, Self::Error> {
-            http::Response::builder()
-                .status(200)
-                .body(request.into_body())
-        }
-    }
-
-    #[tokio::test]
-    async fn test_generic_echo_handler() {
-        let handler = GenericEchoHandler;
-
-        // Test with Bytes
-        let request = http::Request::builder()
-            .uri("/echo")
-            .body(Bytes::from("echo bytes"))
-            .unwrap();
-
-        let response = handler.handle(request).await.unwrap();
-        assert_eq!(response.body(), &Bytes::from("echo bytes"));
-
-        // Test with Vec<u8>
-        let request = http::Request::builder()
-            .uri("/echo")
-            .body(vec![72, 101, 108, 108, 111]) // "Hello" in ASCII
-            .unwrap();
-
-        let response = handler.handle(request).await.unwrap();
-        assert_eq!(response.body(), &Bytes::from("Hello"));
+        assert_eq!(&collected[..], b"Internal Server Error");
     }
 }

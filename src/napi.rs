@@ -2,19 +2,22 @@ use std::{
     collections::HashMap,
     net::SocketAddr,
     ops::{Deref, DerefMut},
+    pin::Pin,
 };
 
-use bytes::BytesMut;
+use bytes::{Bytes, BytesMut};
 use http::{
     HeaderMap as HttpHeaderMap, HeaderName, HeaderValue as HttpHeaderValue,
     request::Builder as RequestBuilder, response::Builder as ResponseBuilder,
 };
+use http_body::Body;
+use napi::bindgen_prelude::async_iterator::AsyncGenerator;
 use napi::{Either, Error, Result, Status, bindgen_prelude::*};
 use napi_derive::napi;
 
 use crate::{
-    Request as InnerRequest, RequestBuilderExt, RequestExt, Response as InnerResponse,
-    ResponseBuilderExt, ResponseExt, SocketInfo as InnerSocketInfo,
+    RequestBody, RequestBuilderExt, RequestExt, ResponseBody, ResponseBuilderExt, ResponseExt,
+    SocketInfo as InnerSocketInfo, WebSocketMode,
 };
 
 //
@@ -60,36 +63,6 @@ impl TryFrom<HeaderMap> for HttpHeaderMap {
         }
 
         Ok(headers)
-    }
-}
-
-//
-// HeaderValue
-//
-
-struct HeaderValue(HttpHeaderValue);
-
-impl Deref for HeaderValue {
-    type Target = HttpHeaderValue;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for HeaderValue {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl TryFrom<String> for HeaderValue {
-    type Error = Error;
-
-    fn try_from(value: String) -> std::result::Result<Self, Self::Error> {
-        HttpHeaderValue::try_from(value)
-            .map_err(|e| Error::new(Status::InvalidArg, format!("Invalid header value: {}", e)))
-            .map(HeaderValue)
     }
 }
 
@@ -542,7 +515,7 @@ impl Headers {
     /// console.log(headers.toJSON());
     /// ```
     #[napi(js_name = "toJSON")]
-    pub fn to_json(&self, env: &Env) -> Result<Object> {
+    pub fn to_json(&self, env: &Env) -> Result<Object<'_>> {
         let mut obj = Object::new(env)?;
 
         for key in self.keys() {
@@ -583,6 +556,8 @@ pub struct RequestOptions {
     pub socket: Option<SocketInfo>,
     /// Document root for the request, if applicable.
     pub docroot: Option<String>,
+    /// Whether this is a WebSocket request.
+    pub websocket: Option<bool>,
 }
 
 /// Wraps an http::Request instance to expose it to JavaScript.
@@ -591,7 +566,7 @@ pub struct RequestOptions {
 /// the request along with a toJSON method to convert it to a JSON object.
 #[napi]
 #[derive(Debug)]
-pub struct Request(InnerRequest);
+pub struct Request(crate::Request);
 
 #[napi]
 impl Request {
@@ -671,12 +646,26 @@ impl Request {
             request = request.document_root(docroot.into());
         }
 
-        let body = options
-            .body
-            .map(|body| BytesMut::from(body.deref()))
-            .unwrap_or_default();
+        // Build the request first, then set WebSocket mode extension if specified
+        let websocket = options.websocket.unwrap_or(false);
 
-        let request = request.body(body).expect("Failed to build request");
+        // Create empty request body
+        let body = RequestBody::new();
+
+        let mut request = request.body(body).expect("Failed to build request");
+
+        // Store body data in BodyBuffer extension if provided (to be sent later in Task::compute)
+        if let Some(body_buf) = options.body {
+            let bytes = Bytes::copy_from_slice(body_buf.as_ref());
+            request
+                .extensions_mut()
+                .insert(crate::BodyBuffer::from_bytes(bytes));
+        }
+
+        // Set WebSocket mode extension after building
+        if websocket {
+            request.extensions_mut().insert(WebSocketMode);
+        }
 
         Ok(Request(request))
     }
@@ -851,6 +840,8 @@ impl Request {
 
     /// Get the body of the request as a Buffer.
     ///
+    /// Returns buffered data if the request was created with a body in the constructor.
+    ///
     /// # Examples
     ///
     /// ```js
@@ -864,28 +855,12 @@ impl Request {
     /// console.log(request.body.toString()); // {"message":"Hello, world!"}
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn body(&self) -> Buffer {
-        Buffer::from(self.0.body().to_vec())
-    }
-
-    /// Set the body of the request.
-    ///
-    /// # Examples
-    ///
-    /// ```js
-    /// const request = new Request({
-    ///  url: "/v2/api/thing"
-    /// });
-    ///
-    /// request.body = Buffer.from(JSON.stringify({
-    ///   message: 'Hello, world!'
-    /// }));
-    ///
-    /// console.log(request.body.toString()); // {"message":"Hello, world!"}
-    /// ```
-    #[napi(setter, enumerable = true, js_name = "body")]
-    pub fn set_body(&mut self, body: Buffer) {
-        *self.0.body_mut() = BytesMut::from(body.deref());
+    pub fn body(&self) -> Option<Buffer> {
+        // Check if there's a BodyBuffer extension with buffered data
+        self.0
+            .extensions()
+            .get::<crate::BodyBuffer>()
+            .map(|buf| Buffer::from(buf.as_bytes().to_vec()))
     }
 
     /// Convert the response to a JSON object representation.
@@ -907,20 +882,116 @@ impl Request {
     /// console.log(request.toJSON());
     /// ```
     #[napi(js_name = "toJSON")]
-    pub fn to_json(&self, env: &Env) -> Result<Object> {
+    pub fn to_json(&self, env: &Env) -> Result<Object<'_>> {
         let mut obj = Object::new(env)?;
         obj.set("method", self.method())?;
         obj.set("url", self.url())?;
         obj.set("headers", self.headers().to_json(env)?)?;
-        obj.set("body", self.body())?;
+
+        // Include body if available (buffered from constructor)
+        if let Some(body) = self.body() {
+            obj.set("body", body)?;
+        }
+
         Ok(obj)
     }
-}
 
-// Rust-only methods (not exposed to JavaScript)
-impl Request {
-    /// Consume this Request and return the inner HTTP request.
-    pub fn into_inner(self) -> InnerRequest {
+    /// Write a chunk to the request body stream
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///   method: "POST",
+    ///   url: "/upload"
+    /// });
+    ///
+    /// await request.write(Buffer.from('chunk 1'));
+    /// await request.write('chunk 2');
+    /// await request.end();
+    /// ```
+    #[napi]
+    pub async fn write(&self, chunk: Either<Buffer, String>) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        // Check if a body buffer is already present (body already provided)
+        if self
+            .0
+            .extensions()
+            .get::<crate::extensions::BodyBuffer>()
+            .is_some()
+        {
+            return Err(Error::from_reason(
+                "Cannot write to request: body has already been provided",
+            ));
+        }
+
+        // Auto-detect WebSocket mode and encode frames transparently
+        let is_websocket = self.0.extensions().get::<crate::WebSocketMode>().is_some();
+
+        if is_websocket {
+            // WebSocket mode: encode as frames
+            let encoder = crate::websocket::WebSocketEncoder::new(self.0.body().clone());
+            match chunk {
+                Either::A(buf) => encoder
+                    .write_binary(buf.as_ref(), false)
+                    .await
+                    .map_err(|e| Error::from_reason(format!("WebSocket error: {:?}", e))),
+                Either::B(s) => encoder
+                    .write_text(&s, false)
+                    .await
+                    .map_err(|e| Error::from_reason(format!("WebSocket error: {:?}", e))),
+            }
+        } else {
+            // HTTP mode: write raw bytes
+            let bytes = match chunk {
+                Either::A(buf) => Bytes::copy_from_slice(buf.as_ref()),
+                Either::B(s) => Bytes::from(s),
+            };
+
+            let mut body = self.0.body().clone();
+            body.write_all(&bytes)
+                .await
+                .map_err(|e| Error::from_reason(e.to_string()))
+        }
+    }
+
+    /// End the request body stream (HTTP mode only)
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const request = new Request({
+    ///   method: "POST",
+    ///   url: "/upload"
+    /// });
+    ///
+    /// await request.write(Buffer.from('data'));
+    /// await request.end();
+    /// ```
+    #[napi]
+    pub async fn end(&self) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+
+        // If a body buffer is already present, the body has been provided so just return
+        if self
+            .0
+            .extensions()
+            .get::<crate::extensions::BodyBuffer>()
+            .is_some()
+        {
+            return Ok(());
+        }
+
+        // Shutdown the write side of the duplex stream to signal end of request
+        let mut body = self.0.body().clone();
+        body.shutdown()
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    /// Consume this Request and return the inner Request
+    pub fn into_inner(self) -> crate::Request {
         self.0
     }
 }
@@ -951,20 +1022,30 @@ impl Clone for Request {
             req.set_socket_info(socket.clone());
         }
 
+        // Copy the BodyBuffer extension if it exists (for buffered requests)
+        if let Some(body_buffer) = self.0.extensions().get::<crate::BodyBuffer>() {
+            req.extensions_mut().insert(body_buffer.clone());
+        }
+
+        // Copy the WebSocketMode extension if it exists
+        if self.0.extensions().get::<crate::WebSocketMode>().is_some() {
+            req.extensions_mut().insert(crate::WebSocketMode);
+        }
+
         Request(req)
     }
 }
 
 impl Deref for Request {
-    type Target = InnerRequest;
+    type Target = crate::Request;
 
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
-impl From<InnerRequest> for Request {
-    fn from(request: InnerRequest) -> Self {
+impl From<crate::Request> for Request {
+    fn from(request: crate::Request) -> Self {
         Request(request)
     }
 }
@@ -976,7 +1057,7 @@ impl FromNapiValue for Request {
             return Ok(instance.deref().clone());
         }
 
-        // If both conversions fail, return an error
+        // If conversion fails, return an error
         Err(Error::new(Status::InvalidArg, "Expected Request"))
     }
 }
@@ -1027,7 +1108,7 @@ pub struct ResponseOptions {
 /// console.log(response.body.toString()); // {"message":"Hello, world!"}
 /// ```
 #[napi]
-pub struct Response(InnerResponse);
+pub struct Response(crate::Response);
 
 #[napi]
 impl Response {
@@ -1067,17 +1148,31 @@ impl Response {
             builder = builder.exception(exception);
         }
 
-        let body = options
-            .body
-            .map(|body| BytesMut::from(body.deref()))
-            .unwrap_or_default();
+        // Create response body
+        let response_body = ResponseBody::new();
 
-        let response = builder.body(body).map_err(|e| {
+        // If body data is provided, store it in buffered_body extension
+        // The actual writing to the stream happens lazily when the body is accessed
+        let buffered_body = if let Some(body_buf) = options.body {
+            let bytes = Bytes::copy_from_slice(body_buf.as_ref());
+            Some(bytes)
+        } else {
+            None
+        };
+
+        let mut response = builder.body(response_body).map_err(|e| {
             Error::new(
                 Status::InvalidArg,
                 format!("Failed to build response: {}", e),
             )
         })?;
+
+        // Store buffered body as extension if provided
+        if let Some(bytes) = buffered_body {
+            response
+                .extensions_mut()
+                .insert(crate::BodyBuffer::from_bytes(bytes));
+        }
 
         Ok(Response(response))
     }
@@ -1164,40 +1259,33 @@ impl Response {
         *self.0.headers_mut() = headers.deref().clone();
     }
 
-    /// Get the body of the response as a Buffer.
+    /// Get the buffered body of the response as a Buffer.
+    ///
+    /// Note: With the new streaming architecture, response bodies are not buffered by default.
+    /// This getter returns buffered data if it was explicitly buffered (e.g., by handleRequest).
+    /// For streaming responses, use the AsyncIterator protocol via next().
+    ///
+    /// Returns `undefined` for streaming responses without buffering.
     ///
     /// # Examples
     ///
     /// ```js
-    /// const response = new Response({
-    ///   body: Buffer.from(JSON.stringify({
-    ///     message: 'Hello, world!'
-    ///   }))
-    /// });
+    /// // After handleRequest (automatically buffered)
+    /// const response = await python.handleRequest(request);
+    /// console.log(response.body.toString()); // Works - body was buffered
     ///
-    /// console.log(response.body.toString()); // {"message":"Hello, world!"}
+    /// // For streaming responses, use AsyncIterator
+    /// for await (const chunk of response) {
+    ///   console.log(chunk.toString());
+    /// }
     /// ```
     #[napi(getter, enumerable = true)]
-    pub fn body(&self) -> Buffer {
-        Buffer::from(self.0.body().to_vec())
-    }
-
-    /// Set the body of the response.
-    ///
-    /// # Examples
-    ///
-    /// ```js
-    /// const response = new Response();
-    ///
-    /// response.body = Buffer.from(JSON.stringify({
-    ///   message: 'Hello, world!'
-    /// }));
-    ///
-    /// console.log(response.body.toString()); // {"message":"Hello, world!"}
-    /// ```
-    #[napi(setter, enumerable = true, js_name = "body")]
-    pub fn set_body(&mut self, body: Buffer) {
-        *self.0.body_mut() = BytesMut::from(body.deref());
+    pub fn body(&self) -> Option<Buffer> {
+        // Check if there's a BodyBuffer extension with buffered data
+        self.0
+            .extensions()
+            .get::<crate::BodyBuffer>()
+            .map(|buf| Buffer::from(buf.as_bytes().to_vec()))
     }
 
     /// Get the log of the response as a Buffer.
@@ -1253,11 +1341,15 @@ impl Response {
     /// console.log(response.toJSON());
     /// ```
     #[napi(js_name = "toJSON")]
-    pub fn to_json(&self, env: &Env) -> Result<Object> {
+    pub fn to_json(&self, env: &Env) -> Result<Object<'_>> {
         let mut obj = Object::new(env)?;
         obj.set("status", self.status())?;
         obj.set("headers", self.headers().to_json(env)?)?;
-        obj.set("body", self.body())?;
+
+        // Include body if available (either buffered or null)
+        if let Some(body) = self.body() {
+            obj.set("body", body)?;
+        }
 
         // Only include log if it has content
         if let Some(log) = self.0.log() {
@@ -1273,10 +1365,112 @@ impl Response {
 
         Ok(obj)
     }
+
+    /// Set up async iteration support on this Response object.
+    ///
+    /// This method sets up Symbol.asyncIterator on the JavaScript Response object,
+    /// allowing the response body to be consumed using `for await...of` loops.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// const res = await handler.handleStream(req);
+    ///
+    /// // Access response properties immediately
+    /// console.log(res.status);  // 200
+    /// console.log(res.headers.get('content-type'));  // 'text/plain'
+    ///
+    /// // Stream the response body
+    /// for await (const chunk of res) {
+    ///   console.log(chunk.toString());
+    /// }
+    /// ```
+    pub fn make_streamable(self, env: Env) -> Result<Object<'static>> {
+        use napi::bindgen_prelude::async_iterator::symbol_async_generator;
+        use napi::sys;
+        use std::ptr;
+
+        let raw_env = env.raw();
+
+        // Convert this Response to a JavaScript value (this creates the JS object and consumes self)
+        let response_js_value = unsafe { Self::to_napi_value(raw_env, self)? };
+
+        // Get Symbol.asyncIterator
+        let mut global = ptr::null_mut();
+        napi::check_status!(
+            unsafe { sys::napi_get_global(raw_env, &mut global) },
+            "Get global failed"
+        )?;
+
+        let mut symbol_object = ptr::null_mut();
+        napi::check_status!(
+            unsafe {
+                sys::napi_get_named_property(
+                    raw_env,
+                    global,
+                    c"Symbol".as_ptr().cast(),
+                    &mut symbol_object,
+                )
+            },
+            "Get Symbol failed"
+        )?;
+
+        let mut iterator_symbol = ptr::null_mut();
+        napi::check_status!(
+            unsafe {
+                sys::napi_get_named_property(
+                    raw_env,
+                    symbol_object,
+                    c"asyncIterator".as_ptr().cast(),
+                    &mut iterator_symbol,
+                )
+            },
+            "Get Symbol.asyncIterator failed"
+        )?;
+
+        // Extract native pointer to use in the generator function
+        let mut response_ref = ptr::null_mut();
+        napi::check_status!(
+            unsafe { sys::napi_unwrap(raw_env, response_js_value, &mut response_ref) },
+            "Failed to unwrap Response"
+        )?;
+
+        // Create generator function
+        let mut generator_function = ptr::null_mut();
+        napi::check_status!(
+            unsafe {
+                sys::napi_create_function(
+                    raw_env,
+                    c"AsyncIterator".as_ptr().cast(),
+                    13,
+                    Some(symbol_async_generator::<Response>),
+                    response_ref,
+                    &mut generator_function,
+                )
+            },
+            "Create asyncIterator function failed"
+        )?;
+
+        // Set Symbol.asyncIterator on the Response object
+        napi::check_status!(
+            unsafe {
+                sys::napi_set_property(
+                    raw_env,
+                    response_js_value,
+                    iterator_symbol,
+                    generator_function,
+                )
+            },
+            "Failed to set Symbol.asyncIterator"
+        )?;
+
+        // Return the JS object we just modified
+        Ok(Object::from_raw(raw_env, response_js_value))
+    }
 }
 
 impl Deref for Response {
-    type Target = InnerResponse;
+    type Target = crate::Response;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -1289,8 +1483,236 @@ impl DerefMut for Response {
     }
 }
 
-impl From<InnerResponse> for Response {
-    fn from(response: InnerResponse) -> Self {
+impl From<crate::Response> for Response {
+    fn from(response: crate::Response) -> Self {
         Response(response)
+    }
+}
+
+#[napi]
+impl Response {
+    /// Read the next chunk from the response body stream
+    ///
+    /// Returns the next chunk as a Buffer, or undefined if the stream has ended.
+    /// This method is used to implement AsyncIterator in JavaScript.
+    ///
+    /// For WebSocket responses (when WebSocketMode extension is present), this automatically
+    /// decodes WebSocket frames and returns the payload data.
+    ///
+    /// # Examples
+    ///
+    /// ```js
+    /// console.log(await response.next()); // Buffer | undefined
+    /// ```
+    #[napi]
+    pub async unsafe fn next(&mut self) -> Result<Option<Buffer>> {
+        use http_body_util::BodyExt;
+        use tokio_util::codec::Decoder;
+
+        // Auto-detect WebSocket mode and decode frames transparently
+        let is_websocket = self.0.extensions().get::<crate::WebSocketMode>().is_some();
+
+        if is_websocket {
+            // WebSocket mode: read HTTP body frames and decode as WebSocket frames
+            // Get or create the decoder state from extensions
+            let (codec, buffer) = {
+                let extensions = self.0.extensions();
+                if extensions
+                    .get::<crate::extensions::WebSocketDecoderState>()
+                    .is_none()
+                {
+                    self.0
+                        .extensions_mut()
+                        .insert(crate::extensions::WebSocketDecoderState::new());
+                }
+
+                let state = self
+                    .0
+                    .extensions()
+                    .get::<crate::extensions::WebSocketDecoderState>()
+                    .unwrap();
+                (state.codec().clone(), state.buffer().clone())
+            };
+
+            // Try to decode a frame from existing buffer first
+            loop {
+                {
+                    let mut buf = buffer.lock().await;
+                    let mut codec_guard = codec.lock().await;
+
+                    match codec_guard.decode(&mut *buf) {
+                        Ok(Some(frame)) => {
+                            // Successfully decoded a frame
+                            // Handle different frame types
+                            if frame.is_close() {
+                                // Close frame - signal end of stream
+                                return Ok(None);
+                            } else if frame.is_text() || frame.is_binary() {
+                                // Data frame - return payload
+                                if frame.payload.is_empty() {
+                                    continue; // Empty frame, try next
+                                }
+                                return Ok(Some(Buffer::from(frame.payload)));
+                            } else {
+                                // Control frames (ping/pong) or unknown - skip them
+                                continue;
+                            }
+                        }
+                        Ok(None) => {
+                            // Need more data - fall through to read HTTP body frame
+                        }
+                        Err(e) => {
+                            return Err(Error::from_reason(format!(
+                                "WebSocket decode error: {:?}",
+                                e
+                            )));
+                        }
+                    }
+                }
+
+                // Read next HTTP body frame to get more WebSocket data
+                match self.0.body_mut().frame().await {
+                    Some(Ok(frame)) => {
+                        if let Ok(data) = frame.into_data() {
+                            if data.is_empty() {
+                                continue; // Empty HTTP frame, try next
+                            }
+                            // Append data to buffer and try decoding again
+                            let mut buf = buffer.lock().await;
+                            buf.extend_from_slice(&data);
+                        } else {
+                            // Trailers or empty, continue
+                            continue;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        return Err(Error::from_reason(e));
+                    }
+                    None => {
+                        // HTTP body ended - check for exception
+                        // Exception is stored as Arc<Mutex<Option<ResponseException>>> by python-node
+                        if let Some(exc_holder) = self.0.extensions().get::<std::sync::Arc<
+                            tokio::sync::Mutex<Option<crate::extensions::ResponseException>>,
+                        >>() {
+                            if let Ok(guard) = exc_holder.try_lock() {
+                                if let Some(exc) = guard.as_ref() {
+                                    return Err(Error::from_reason(exc.message().to_string()));
+                                }
+                            }
+                        }
+                        return Ok(None);
+                    }
+                }
+            }
+        } else {
+            // HTTP mode: read raw body frames
+            match self.0.body_mut().frame().await {
+                Some(Ok(frame)) => {
+                    // Extract data from frame if present
+                    if let Ok(data) = frame.into_data() {
+                        Ok(Some(Buffer::from(data.to_vec())))
+                    } else {
+                        // Frame was trailers, skip it
+                        Ok(None)
+                    }
+                }
+                Some(Err(e)) => Err(Error::from_reason(e)),
+                None => {
+                    // Check if there's a ResponseException before signaling EOF
+                    // Exception is stored as Arc<Mutex<Option<ResponseException>>> by python-node
+                    if let Some(exc_holder) = self.0.extensions().get::<std::sync::Arc<
+                        tokio::sync::Mutex<Option<crate::extensions::ResponseException>>,
+                    >>() {
+                        if let Ok(guard) = exc_holder.try_lock() {
+                            if let Some(exc) = guard.as_ref() {
+                                return Err(Error::from_reason(exc.message().to_string()));
+                            }
+                        }
+                    }
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+/// Implement AsyncGenerator on Response to enable JavaScript's `for await` syntax.
+///
+/// # Safety Considerations
+///
+/// This implementation uses unsafe code to work around a fundamental lifetime constraint:
+/// - `AsyncGenerator::next(&mut self)` borrows `self` with a limited lifetime
+/// - But it must return a `Future + 'static` (required by the trait)
+///
+/// We use a raw pointer to the ResponseBody to bridge this gap. This is sound because:
+///
+/// 1. **NAPI-RS Lifetime Management**: NAPI-RS leaks the Response object using
+///    `Box::leak(Box::from_raw(ptr))`, creating a true `'static` reference. The `&mut self`
+///    parameter actually has a `'static` lifetime.
+///
+/// 2. **Single-Threaded Execution**: Node.js is single-threaded. While JavaScript can create
+///    multiple concurrent promises by calling `next()` repeatedly, the synchronous execution
+///    of the `next()` method itself (creating the future) happens sequentially on the event
+///    loop thread. There are no overlapping mutable borrows during the synchronous portion.
+///
+/// 3. **Independent Futures**: Each returned future captures the pointer independently.
+///    While multiple futures may exist concurrently, they access the underlying `ResponseBody`
+///    through a channel receiver (`poll_frame()`), which safely handles concurrent polling.
+///
+/// The unsafe code is confined to pointer creation and dereferencing within the future,
+/// with detailed documentation of the invariants that make it sound.
+impl AsyncGenerator for Response {
+    type Yield = Buffer;
+    type Next = ();
+    type Return = ();
+
+    fn next(
+        &mut self,
+        _value: Option<Self::Next>,
+    ) -> impl Future<Output = Result<Option<Self::Yield>>> + Send + 'static {
+        use std::future::poll_fn;
+
+        // SAFETY: Extend the lifetime of the body reference to 'static.
+        // This is safe because NAPI-RS has already leaked the Response object via Box::leak,
+        // so `self` is actually &'static mut Response. We're just making that explicit.
+        // Node.js is single-threaded, so concurrent calls to next() execute sequentially.
+        let body: &'static mut crate::ResponseBody =
+            unsafe { std::mem::transmute(self.0.body_mut()) };
+
+        // Capture exception holder for checking on EOF
+        let exception_holder = self.0.extensions()
+            .get::<std::sync::Arc<tokio::sync::Mutex<Option<crate::extensions::ResponseException>>>>()
+            .cloned();
+
+        async move {
+            let result = poll_fn(|cx| Pin::new(&mut *body).poll_frame(cx)).await;
+
+            match result {
+                Some(Ok(frame)) => {
+                    if let Ok(data) = frame.into_data() {
+                        if data.is_empty() {
+                            Ok(None)
+                        } else {
+                            Ok(Some(Buffer::from(data.to_vec())))
+                        }
+                    } else {
+                        // Frame contains trailers or is empty, treat as no data
+                        Ok(None)
+                    }
+                }
+                Some(Err(e)) => Err(Error::from_reason(e)),
+                None => {
+                    // Stream ended - check for exception stored by python-node
+                    if let Some(exc_holder) = exception_holder {
+                        if let Ok(guard) = exc_holder.try_lock() {
+                            if let Some(exc) = guard.as_ref() {
+                                return Err(Error::from_reason(exc.message().to_string()));
+                            }
+                        }
+                    }
+                    Ok(None)
+                }
+            }
+        }
     }
 }

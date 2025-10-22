@@ -5,7 +5,9 @@ use std::{
     net::SocketAddr,
     ops::{Deref, DerefMut},
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 
 /// Socket information for a request
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -72,6 +74,47 @@ impl DerefMut for DocumentRoot {
 impl From<String> for DocumentRoot {
     fn from(path: String) -> Self {
         Self::new(path)
+    }
+}
+
+/// WebSocket mode marker for a request/response
+///
+/// This extension indicates that the request/response should be treated as a WebSocket
+/// connection, where each write() call represents a complete WebSocket message rather
+/// than HTTP chunks.
+///
+/// The presence of this extension in the request/response extensions indicates WebSocket mode is enabled.
+/// To check if WebSocket mode is enabled, use: `request.extensions().get::<WebSocketMode>().is_some()`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebSocketMode;
+
+/// WebSocket decoder state for response body decoding
+///
+/// This extension stores a persistent WebSocketCodec and buffer that are used across multiple
+/// Response::next() calls to properly decode WebSocket frames from HTTP body data.
+#[derive(Clone)]
+pub struct WebSocketDecoderState {
+    codec: Arc<Mutex<crate::websocket::WebSocketCodec>>,
+    buffer: Arc<Mutex<BytesMut>>,
+}
+
+impl WebSocketDecoderState {
+    /// Create a new WebSocketDecoderState
+    pub fn new() -> Self {
+        Self {
+            codec: Arc::new(Mutex::new(crate::websocket::WebSocketCodec::new())),
+            buffer: Arc::new(Mutex::new(BytesMut::with_capacity(8192))),
+        }
+    }
+
+    /// Get a reference to the codec
+    pub fn codec(&self) -> &Arc<Mutex<crate::websocket::WebSocketCodec>> {
+        &self.codec
+    }
+
+    /// Get a reference to the buffer
+    pub fn buffer(&self) -> &Arc<Mutex<BytesMut>> {
+        &self.buffer
     }
 }
 
