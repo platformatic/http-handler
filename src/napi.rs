@@ -587,7 +587,7 @@ pub struct RequestOptions {
 /// It provides methods to access the HTTP method, URI, headers, and body of
 /// the request along with a toJSON method to convert it to a JSON object.
 #[napi]
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Request(InnerRequest);
 
 #[napi]
@@ -914,17 +914,49 @@ impl Request {
     }
 }
 
+// Rust-only methods (not exposed to JavaScript)
+impl Request {
+    /// Consume this Request and return the inner HTTP request.
+    pub fn into_inner(self) -> InnerRequest {
+        self.0
+    }
+}
+
+impl Clone for Request {
+    fn clone(&self) -> Self {
+        use crate::RequestExt;
+
+        // Build a new request with all fields cloned
+        let mut builder = http::request::Builder::new()
+            .method(self.0.method().clone())
+            .uri(self.0.uri().clone())
+            .version(self.0.version());
+
+        for (key, value) in self.0.headers() {
+            builder = builder.header(key.clone(), value.clone());
+        }
+
+        let mut req = builder
+            .body(self.0.body().clone())
+            .expect("Failed to build request");
+
+        // Copy extensions manually
+        if let Some(docroot) = self.0.document_root() {
+            req.set_document_root(docroot.clone());
+        }
+        if let Some(socket) = self.0.socket_info() {
+            req.set_socket_info(socket.clone());
+        }
+
+        Request(req)
+    }
+}
+
 impl Deref for Request {
     type Target = InnerRequest;
 
     fn deref(&self) -> &Self::Target {
         &self.0
-    }
-}
-
-impl DerefMut for Request {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
