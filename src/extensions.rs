@@ -75,6 +75,17 @@ impl From<String> for DocumentRoot {
     }
 }
 
+/// WebSocket mode marker for a request/response
+///
+/// This extension indicates that the request/response should be treated as a WebSocket
+/// connection, where each write() call represents a complete WebSocket message rather
+/// than HTTP chunks.
+///
+/// The presence of this extension in the request/response extensions indicates WebSocket mode is enabled.
+/// To check if WebSocket mode is enabled, use: `request.extensions().get::<WebSocketMode>().is_some()`
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WebSocketMode;
+
 /// Response log buffer
 #[derive(Clone, Debug, Default)]
 pub struct ResponseLog {

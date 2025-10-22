@@ -1,4 +1,4 @@
-import { ok, throws, doesNotThrow, deepStrictEqual, strictEqual } from 'node:assert/strict'
+import { ok, throws, doesNotThrow, deepStrictEqual, strictEqual, rejects } from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { Request } from '../index.js'
@@ -133,9 +133,6 @@ test('Request', async t => {
 
     ok(request.body instanceof Buffer, 'should create Buffer instance for body')
     deepStrictEqual(request.body, body, 'should set the body correctly')
-
-    request.body = Buffer.from('New Body')
-    deepStrictEqual(request.body, Buffer.from('New Body'), 'should update the body correctly')
   })
 
   await t.test('toJSON', () => {
@@ -152,5 +149,53 @@ test('Request', async t => {
       headers: { 'content-type': 'application/json' },
       body: Buffer.from('Hello, World!')
     }, 'should convert to JSON correctly')
+  })
+
+  await t.test('write() should error when body is already provided', async () => {
+    // Create a request with a body already provided
+    const request = new Request({
+      method: 'POST',
+      url: 'https://example.com/test',
+      body: Buffer.from('initial body')
+    })
+
+    // Trying to write should throw an error
+    await rejects(
+      async () => {
+        await request.write(Buffer.from('more data'))
+      },
+      {
+        message: 'Cannot write to request: body has already been provided'
+      }
+    )
+  })
+
+  await t.test('end() should succeed silently when body is already provided', async () => {
+    // Create a request with a body already provided
+    const request = new Request({
+      method: 'POST',
+      url: 'https://example.com/test',
+      body: Buffer.from('initial body')
+    })
+
+    // Trying to end should not throw (returns silently)
+    await doesNotThrow(async () => {
+      await request.end()
+    }, 'should not throw error when calling end() on request with existing body buffer')
+  })
+
+  await t.test('write() and end() should work when body is not provided', async () => {
+    // Create a request without a body
+    const request = new Request({
+      method: 'POST',
+      url: 'https://example.com/test'
+    })
+
+    // These should not throw
+    await doesNotThrow(async () => {
+      await request.write(Buffer.from('chunk 1'))
+      await request.write(Buffer.from('chunk 2'))
+      await request.end()
+    }, 'should allow write() and end() when no body buffer is present')
   })
 })

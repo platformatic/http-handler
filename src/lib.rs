@@ -7,6 +7,8 @@
 // Re-export everything from http crate
 pub use http::*;
 
+/// Body types for HTTP requests and responses with streaming support
+pub mod body;
 pub mod extensions;
 pub mod handler;
 pub mod types;
@@ -15,9 +17,10 @@ pub mod types;
 #[cfg(feature = "napi-support")]
 pub mod napi;
 
+pub use body::{RequestBody, ResponseBody, StreamChunk, StreamError};
+pub use types::{Request, Response};
 pub use extensions::{
     BodyBuffer, RequestBuilderExt, RequestExt, ResponseBuilderExt, ResponseException, ResponseExt,
-    ResponseLog, SocketInfo,
+    ResponseLog, SocketInfo, WebSocketMode,
 };
 pub use handler::Handler;
-pub use types::{Request, Response};
