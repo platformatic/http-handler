@@ -14,7 +14,6 @@
 //!
 //! struct HelloHandler;
 //!
-//! #[async_trait::async_trait]
 //! impl Handler for HelloHandler {
 //!     type Error = std::convert::Infallible;
 //!
@@ -41,11 +40,10 @@
 //!     header_value: &'static str,
 //! }
 //!
-//! #[async_trait::async_trait]
 //! impl<H, B> Handler<B> for AddHeaderHandler<H>
 //! where
 //!     H: Handler<B> + std::marker::Sync,
-//!     for<'async_trait> B: std::marker::Send + 'async_trait
+//!     B: std::marker::Send
 //! {
 //!     type Error = H::Error;
 //!
@@ -62,7 +60,6 @@
 //! // Usage
 //! struct ApiHandler;
 //!
-//! #[async_trait::async_trait]
 //! impl Handler for ApiHandler {
 //!     type Error = std::convert::Infallible;
 //!     async fn handle(&self, _req: http::Request<BytesMut>) -> Result<http::Response<BytesMut>, Self::Error> {
@@ -101,7 +98,6 @@ use bytes::BytesMut;
 ///
 /// struct MyHandler;
 ///
-/// #[async_trait::async_trait]
 /// impl Handler for MyHandler {
 ///     type Error = std::convert::Infallible;
 ///
@@ -122,7 +118,6 @@ use bytes::BytesMut;
 ///
 /// struct StringHandler;
 ///
-/// #[async_trait::async_trait]
 /// impl Handler<String> for StringHandler {
 ///     type Error = std::convert::Infallible;
 ///
@@ -137,7 +132,6 @@ use bytes::BytesMut;
 ///     }
 /// }
 /// ```
-#[async_trait::async_trait]
 pub trait Handler<B = BytesMut> {
     /// The error type returned by the handler
     type Error;
@@ -157,7 +151,6 @@ mod tests {
     /// Example handler that echoes the request body
     pub struct EchoHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for EchoHandler {
         type Error = http::Error;
 
@@ -187,7 +180,6 @@ mod tests {
     /// Test handler that adds logging
     struct LoggingHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for LoggingHandler {
         type Error = String;
 
@@ -229,7 +221,6 @@ mod tests {
     /// Test handler that uses socket info
     struct SocketAwareHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for SocketAwareHandler {
         type Error = String;
 
@@ -285,7 +276,6 @@ mod tests {
     /// Test handler that returns errors
     struct ErrorHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for ErrorHandler {
         type Error = String;
 
@@ -313,7 +303,6 @@ mod tests {
     /// Test handler that sets an exception
     struct ExceptionHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for ExceptionHandler {
         type Error = std::convert::Infallible;
 
@@ -351,7 +340,6 @@ mod tests {
     /// Test handler that works with String bodies
     struct StringBodyHandler;
 
-    #[async_trait::async_trait]
     impl Handler<String> for StringBodyHandler {
         type Error = std::convert::Infallible;
 
@@ -430,7 +418,6 @@ mod tests {
     /// Generic echo handler that works with any cloneable body type
     pub struct GenericEchoHandler;
 
-    #[async_trait::async_trait]
     impl Handler<Bytes> for GenericEchoHandler {
         type Error = http::Error;
 
@@ -444,7 +431,6 @@ mod tests {
         }
     }
 
-    #[async_trait::async_trait]
     impl Handler<Vec<u8>> for GenericEchoHandler {
         type Error = http::Error;
 

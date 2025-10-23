@@ -22,7 +22,6 @@ napi-support = ["dep:napi", "dep:napi-derive", "dep:napi-build"]
 napi-build = { version = "2", optional = true }
 
 [dependencies]
-async-trait = "0.1.88"
 bytes = "1.10.1"
 http = "1.0"
 # http-body = "1.0"
