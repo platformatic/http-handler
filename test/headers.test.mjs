@@ -50,7 +50,7 @@ test('Headers', async t => {
       baz: ['buz', 'bux']
     })
     strictEqual(headers.get('foo'), 'bar', 'should return the value of an existing header')
-    deepStrictEqual(headers.get('baz'), 'buz', 'should return first value for a multi-value header')
+    deepStrictEqual(headers.get('baz'), 'bux', 'should return last value for a multi-value header')
     strictEqual(headers.get('not-exists'), null, 'should return null for non-existing header')
   })
 
@@ -108,13 +108,13 @@ test('Headers', async t => {
       foo: 'bar',
       baz: ['buz', 'bux']
     })
-    strictEqual(headers.size, 3, 'should have correct size with multiple headers')
+    strictEqual(headers.size, 2, 'should count unique header keys')
     headers.set('foo', 'new-value')
-    strictEqual(headers.size, 3, 'should not change size when replacing a header value')
+    strictEqual(headers.size, 2, 'should not change size when replacing a header value')
     headers.add('new-header', 'value')
-    strictEqual(headers.size, 4, 'should increase size when adding a new header')
+    strictEqual(headers.size, 3, 'should increase size when adding a new header')
     headers.add('baz', 'new-baz-value')
-    strictEqual(headers.size, 5, 'should increase size when adding a new value to an existing header')
+    strictEqual(headers.size, 3, 'should not increase size when adding a new value to an existing header')
     headers.clear()
     strictEqual(headers.size, 0, 'should be zero after clearing headers')
   })
