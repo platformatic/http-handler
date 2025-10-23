@@ -262,8 +262,11 @@ impl Headers {
     /// ```
     #[napi]
     pub fn get(&self, key: String) -> Option<String> {
+        // Return the last value for this key (HTTP headers can have multiple values)
         self.0
-            .get(&key)
+            .get_all(&key)
+            .iter()
+            .last()
             .and_then(|v| v.to_str().map(|s| s.to_string()).ok())
     }
 
@@ -431,7 +434,7 @@ impl Headers {
     /// ```
     #[napi(getter)]
     pub fn size(&self) -> u32 {
-        self.0.len() as u32
+        self.0.keys_len() as u32
     }
 
     /// Get an iterator over the header entries.
