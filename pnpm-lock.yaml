@@ -10,7 +10,7 @@ importers:
     devDependencies:
       '@napi-rs/cli':
         specifier: ^3.0.4
-        version: 3.3.1(@emnapi/runtime@1.6.0)
+        version: 3.4.1(@emnapi/runtime@1.6.0)
       '@oxc-node/core':
         specifier: ^0.0.32
         version: 0.0.32
@@ -163,8 +163,8 @@ packages:
       '@types/node':
         optional: true
 
-  '@napi-rs/cli@3.3.1':
-    resolution: {integrity: sha512-KVO9tLhtOtDc8iMUJYRkj6WZcYmV6+fhXbLa1Qstrm6ZQa9McIsqjFH7PLx3BnEWwejjJrenrCX5JENwl0MpKg==}
+  '@napi-rs/cli@3.4.1':
+    resolution: {integrity: sha512-ayhm+NfrP5Hmh7vy5pfyYm/ktYtLh2PrgdLuqHTAubO7RoO2JkUE4F991AtgYxNewwXI8+guZLxU8itV7QnDrQ==}
     engines: {node: '>= 16'}
     hasBin: true
     peerDependencies:
@@ -735,8 +735,8 @@ packages:
   emoji-regex@8.0.0:
     resolution: {integrity: sha512-MSjYzcWNOA0ewAHpz0MxpYFvwg6yjy1NG3xteoqz644VCo/RPgnr1/GGt+ic3iJTzQ8Eu3TdM14SawnVUmGE6A==}
 
-  es-toolkit@1.40.0:
-    resolution: {integrity: sha512-8o6w0KFmU0CiIl0/Q/BCEOabF2IJaELM1T2PWj6e8KqzHv1gdx+7JtFnDwOx1kJH/isJ5NwlDG1nCr1HrRF94Q==}
+  es-toolkit@1.41.0:
+    resolution: {integrity: sha512-bDd3oRmbVgqZCJS6WmeQieOrzpl3URcWBUVDXxOELlUW2FuW+0glPOz1n0KnRie+PdyvUZcXz2sOn00c6pPRIA==}
 
   fast-content-type-parse@3.0.0:
     resolution: {integrity: sha512-ZvLdcY8P+N8mGQJahJV5G4U88CSvT1rP8ApL6uETe88MBXrBHAkZlSEySdUlyztF7ccb+Znos3TFqaepHxdhBg==}
@@ -921,7 +921,7 @@ snapshots:
 
   '@inquirer/type@3.0.9': {}
 
-  '@napi-rs/cli@3.3.1(@emnapi/runtime@1.6.0)':
+  '@napi-rs/cli@3.4.1(@emnapi/runtime@1.6.0)':
     dependencies:
       '@inquirer/prompts': 7.9.0
       '@napi-rs/cross-toolchain': 1.0.3
@@ -931,7 +931,7 @@ snapshots:
       colorette: 2.0.20
       debug: 4.4.3
       emnapi: 1.6.0
-      es-toolkit: 1.40.0
+      es-toolkit: 1.41.0
       js-yaml: 4.1.0
       semver: 7.7.3
       typanion: 3.14.0
@@ -1366,7 +1366,7 @@ snapshots:
 
   emoji-regex@8.0.0: {}
 
-  es-toolkit@1.40.0: {}
+  es-toolkit@1.41.0: {}
 
   fast-content-type-parse@3.0.0: {}
 
