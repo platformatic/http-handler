@@ -1,13 +1,13 @@
-//! Core type aliases and implementations for v2
+//! Core type aliases and implementations
 
+use super::body::{RequestBody, ResponseBody};
 use super::extensions::{RequestExt, ResponseExt, SocketInfo};
-use bytes::BytesMut;
 
-/// Type alias for HTTP Request with BytesMut body
-pub type Request = http::Request<BytesMut>;
+/// Type alias for HTTP Request with streaming body
+pub type Request = http::Request<RequestBody>;
 
-/// Type alias for HTTP Response with BytesMut body
-pub type Response = http::Response<BytesMut>;
+/// Type alias for HTTP Response with streaming body
+pub type Response = http::Response<ResponseBody>;
 
 /// Helper functions for building requests with extensions
 pub mod request {
@@ -46,28 +46,33 @@ pub mod response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
     use http::{Method, StatusCode};
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
-    #[test]
-    fn test_request_type_alias() {
+    #[tokio::test]
+    async fn test_request_type_alias() {
+        let body = RequestBody::from_data(Bytes::from("request body"))
+            .await
+            .unwrap();
         let request = http::Request::builder()
             .method(Method::GET)
             .uri("/test")
-            .body(BytesMut::from("request body"))
+            .body(body)
             .unwrap();
 
         assert_eq!(request.method(), Method::GET);
         assert_eq!(request.uri().path(), "/test");
-        assert_eq!(request.body(), &BytesMut::from("request body"));
     }
 
     #[test]
     fn test_response_type_alias() {
+        let request_body = RequestBody::new();
+        let response_body = request_body.create_response();
         let response = http::Response::builder()
             .status(StatusCode::OK)
             .header("Content-Type", "text/plain")
-            .body(BytesMut::from("response body"))
+            .body(response_body)
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -75,15 +80,12 @@ mod tests {
             response.headers().get("content-type").unwrap(),
             "text/plain"
         );
-        assert_eq!(response.body(), &BytesMut::from("response body"));
     }
 
     #[test]
     fn test_request_with_socket_info() {
-        let request = http::Request::builder()
-            .uri("/test")
-            .body(BytesMut::new())
-            .unwrap();
+        let body = RequestBody::new();
+        let request = http::Request::builder().uri("/test").body(body).unwrap();
 
         let local = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
         let remote = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)), 5000);
@@ -97,9 +99,11 @@ mod tests {
 
     #[test]
     fn test_response_with_log() {
+        let request_body = RequestBody::new();
+        let response_body = request_body.create_response();
         let response = http::Response::builder()
             .status(StatusCode::OK)
-            .body(BytesMut::new())
+            .body(response_body)
             .unwrap();
 
         let response = response::with_log(response, "Test log message");
@@ -110,9 +114,11 @@ mod tests {
 
     #[test]
     fn test_response_with_exception() {
+        let request_body = RequestBody::new();
+        let response_body = request_body.create_response();
         let response = http::Response::builder()
             .status(StatusCode::INTERNAL_SERVER_ERROR)
-            .body(BytesMut::new())
+            .body(response_body)
             .unwrap();
 
         let response = response::with_exception(response, "Something went wrong");
@@ -124,9 +130,11 @@ mod tests {
     #[test]
     fn test_combined_extensions() {
         // Test that we can use multiple extensions together
+        let request_body = RequestBody::new();
+        let response_body = request_body.create_response();
         let mut response = http::Response::builder()
             .status(StatusCode::OK)
-            .body(BytesMut::from("body"))
+            .body(response_body)
             .unwrap();
 
         response.set_log("Initial log");
